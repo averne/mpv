@@ -51,6 +51,7 @@ extern const struct ao_driver audio_out_wasapi;
 extern const struct ao_driver audio_out_pcm;
 extern const struct ao_driver audio_out_lavc;
 extern const struct ao_driver audio_out_sdl;
+extern const struct ao_driver audio_out_hos;
 
 static const struct ao_driver * const audio_out_drivers[] = {
 // native:
@@ -87,6 +88,10 @@ static const struct ao_driver * const audio_out_drivers[] = {
 #endif
 #if HAVE_SDL2_AUDIO
     &audio_out_sdl,
+#endif
+#if HAVE_HOS_AUDIO
+    #warning "test"
+    &audio_out_hos,
 #endif
     &audio_out_null,
 #if HAVE_COREAUDIO

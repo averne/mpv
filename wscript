@@ -391,6 +391,10 @@ iconv support use --disable-iconv.",
         'desc': 'SDL2 gamepad input',
         'deps': 'sdl2',
         'func': check_true,
+    }, {
+        'name': '--hos',
+        'desc': 'Horizon OS',
+        'func': check_statement(['switch.h'], ''),
     }
 ]
 
@@ -469,6 +473,11 @@ audio_output_features = [
         'desc': 'WASAPI audio output',
         'deps': 'os-win32 || os-cygwin',
         'func': check_cc(fragment=load_fragment('wasapi.c')),
+    }, {
+        'name': '--hos-audio',
+        'desc': 'Audren audio output',
+        'deps': 'hos',
+        'func': check_true,
     }
 ]
 
