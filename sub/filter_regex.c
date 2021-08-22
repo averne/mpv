@@ -1,5 +1,5 @@
-#include <regex.h>
 #include <sys/types.h>
+#include <regex.h>
 
 #include "common/common.h"
 #include "common/msg.h"

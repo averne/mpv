@@ -62,7 +62,7 @@ bool mp_set_cloexec(int fd)
     return true;
 }
 
-#ifdef __MINGW32__
+#if defined(__MINGW32__) || defined(__SWITCH__)
 int mp_make_cloexec_pipe(int pipes[2])
 {
     pipes[0] = pipes[1] = -1;
