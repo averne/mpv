@@ -263,6 +263,7 @@ def build(ctx):
         ( "audio/out/ao_wasapi.c",               "wasapi" ),
         ( "audio/out/ao_wasapi_changenotify.c",  "wasapi" ),
         ( "audio/out/ao_wasapi_utils.c",         "wasapi" ),
+        ( "audio/out/ao_hos.c",                  "hos-audio" ),
         ( "audio/out/buffer.c" ),
 
         ## Core
