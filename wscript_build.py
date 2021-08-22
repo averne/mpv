@@ -191,7 +191,6 @@ def build(ctx):
         ])
 
     getch2_c = ctx.pick_first_matching_dep([
-        ( "osdep/terminal-unix.c",               "posix" ),
         ( "osdep/terminal-win.c",                "win32-desktop" ),
         ( "osdep/terminal-dummy.c" ),
     ])
@@ -203,13 +202,11 @@ def build(ctx):
     ])
 
     ipc_c = ctx.pick_first_matching_dep([
-        ( "input/ipc-unix.c",                    "posix" ),
         ( "input/ipc-win.c",                     "win32-desktop" ),
         ( "input/ipc-dummy.c" ),
     ])
 
     subprocess_c = ctx.pick_first_matching_dep([
-        ( "osdep/subprocess-posix.c",            "posix" ),
         ( "osdep/subprocess-win.c",              "win32-desktop" ),
         ( "osdep/subprocess-dummy.c" ),
     ])

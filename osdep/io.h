@@ -210,7 +210,7 @@ void freelocale(locale_t);
 
 #else /* __MINGW32__ */
 
-#include <sys/mman.h>
+#include "switch/sys/mman.h"
 
 extern char **environ;
 
