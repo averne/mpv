@@ -41,7 +41,7 @@ struct priv {
     AudioDriverWaveBuf *buffers;
 
     int cur_buf_idx;
-    size_t cur_queued_samples;
+    uint32_t cur_queued_samples, total_queued_samples;
 };
 
 static const AudioRendererConfig ar_config = {
@@ -118,8 +118,6 @@ static int init(struct ao *ao) {
         audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, 1, 1);
     }
 
-    audrvVoiceStop(&priv->driver, 0);
-
     return 0;
 }
 
@@ -137,21 +135,24 @@ static void uninit(struct ao *ao) {
 static void reset(struct ao *ao) {
     struct priv *priv = ao->priv;
 
+    priv->cur_buf_idx = -1;
+    priv->cur_queued_samples = priv->total_queued_samples = 0;
     audrvVoiceStop(&priv->driver, 0);
-    priv->cur_buf_idx = -1, priv->cur_queued_samples = 0;
+    audrvUpdate(&priv->driver);
 }
 
 static bool set_pause(struct ao *ao, bool paused) {
     struct priv *priv = ao->priv;
 
     audrvVoiceSetPaused(&priv->driver, 0, paused);
-    return true;
+    return R_SUCCEEDED(audrvUpdate(&priv->driver));
 }
 
 static void start(struct ao *ao) {
     struct priv *priv = ao->priv;
 
     audrvVoiceStart(&priv->driver, 0);
+    audrvUpdate(&priv->driver);
 }
 
 static int find_free_wavebuf(struct priv *priv) {
@@ -180,12 +181,14 @@ static bool audio_write(struct ao *ao, void **data, int samples) {
 
     // We requested a linear PCM format so there is only one buffer
     memcpy(buf_offset + priv->cur_queued_samples * ao->sstride, data[0], size);
-    priv->cur_queued_samples += num_samples;
+    priv->cur_queued_samples   += num_samples;
+    priv->total_queued_samples += num_samples;
 
     if (priv->cur_queued_samples >= priv->num_samples) {
         // Append buffer once it's full
         armDCacheFlush(buf_offset, priv->num_samples * ao->sstride);
         audrvVoiceAddWaveBuf(&priv->driver, 0, buf);
+        audrvUpdate(&priv->driver);
 
         priv->cur_buf_idx = -1, priv->cur_queued_samples = 0;
 
@@ -212,15 +215,14 @@ static void get_state(struct ao *ao, struct mp_pcm_state *state) {
         AudioDriverWaveBuf *buf = &priv->buffers[i];
         if (buf->state == AudioDriverWaveBufState_Free
                 || buf->state == AudioDriverWaveBufState_Done)
-            state->free_samples   += priv->num_samples;
-        else
-            state->queued_samples += priv->num_samples;
+            state->free_samples += priv->num_samples;
     }
 
-    if (priv->cur_buf_idx != -1) {
-        state->free_samples   -= priv->num_samples - priv->cur_queued_samples;
-        state->queued_samples += priv->cur_queued_samples;
-    }
+    if (priv->cur_buf_idx != -1)
+        state->free_samples -= priv->num_samples - priv->cur_queued_samples;
+
+    state->queued_samples = priv->total_queued_samples -
+        audrvVoiceGetPlayedSampleCount(&priv->driver, 0);
 
     state->delay = (double)state->queued_samples / ao->samplerate;
 
