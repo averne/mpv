@@ -229,6 +229,47 @@ static void get_state(struct ao *ao, struct mp_pcm_state *state) {
     state->playing = audrvVoiceIsPlaying(&priv->driver, 0);
 }
 
+static int control(struct ao *ao, enum aocontrol cmd, void *arg) {
+    struct priv *priv = ao->priv;
+
+    int rc;
+
+    switch (cmd) {
+        case AOCONTROL_SET_MUTE:
+        case AOCONTROL_SET_VOLUME: {
+                float vol;
+                if (cmd == AOCONTROL_SET_MUTE) {
+                    bool in = *(bool *)arg;
+                    vol = !in;
+                } else {
+                    ao_control_vol_t *in = (ao_control_vol_t *)arg;
+                    vol = (in->left + in->right) / 200.0f;
+                }
+
+                audrvVoiceSetVolume(&priv->driver, 0, vol);
+                rc = audrvUpdate(&priv->driver);
+            }
+            break;
+        case AOCONTROL_GET_MUTE:
+        case AOCONTROL_GET_VOLUME: {
+                rc = audrvUpdate(&priv->driver);
+                float vol = priv->driver.in_voices[0].volume;
+                if (cmd == AOCONTROL_GET_MUTE) {
+                    bool *out = (bool *)arg;
+                    *out = !vol;
+                } else {
+                    ao_control_vol_t *out = (ao_control_vol_t *)arg;
+                    out->left = out->right = vol * 100.0f;
+                }
+            }
+            break;
+        default:
+            return CONTROL_UNKNOWN;
+    }
+
+    return R_SUCCEEDED(rc);
+}
+
 #define OPT_BASE_STRUCT struct priv
 
 const struct ao_driver audio_out_hos = {
@@ -237,6 +278,7 @@ const struct ao_driver audio_out_hos = {
     .init            = init,
     .uninit          = uninit,
     .reset           = reset,
+    .control         = control,
     .set_pause       = set_pause,
     .start           = start,
     .write           = audio_write,
