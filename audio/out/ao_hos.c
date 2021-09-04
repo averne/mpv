@@ -293,5 +293,5 @@ const struct ao_driver audio_out_hos = {
         {"num-samples", OPT_INT(num_samples), M_RANGE(256, MAX_SAMPLES)},
         {0}
     },
-    .options_prefix   = "hos",
+    .options_prefix   = "ao-hos",
 };
