@@ -54,16 +54,18 @@ struct priv {
 
     int frame_width,  frame_height;
     int screen_width, screen_height;
+
+    AppletHookCookie hook_cookie;
 };
 
 static void get_current_resolution(int *width, int *height) {
     switch (appletGetOperationMode()) {
         default:
         case AppletOperationMode_Handheld:
-            *width = 1280.0f, *height = 720.0f;
+            *width = 1280, *height = 720;
             break;
         case AppletOperationMode_Console:
-            *width = 1920.0f, *height = 1080.0f;
+            *width = 1920, *height = 1080;
             break;
     }
 }
@@ -97,7 +99,13 @@ static void regen_cmdlists(struct priv *priv) {
     }
 }
 
-static void resize(struct priv *priv, int width, int height) {
+static void resize(struct vo *vo, int width, int height) {
+    struct priv *priv = vo->priv;
+
+    MP_VERBOSE(vo, "Resizing to %dx%d\n", width, height);
+
+    dkQueueWaitIdle(priv->queue);
+
     if (priv->swapchain)
         dkSwapchainDestroy(priv->swapchain);
 
@@ -130,6 +138,15 @@ static void resize(struct priv *priv, int width, int height) {
     priv->screen_width = width, priv->screen_height = height;
 
     regen_cmdlists(priv);
+}
+
+static void handle_applet_hook(AppletHookType type, void *param) {
+    if (type != AppletHookType_OnOperationMode)
+        return;
+
+    int width, height;
+    get_current_resolution(&width, &height);
+    resize(param, width, height);
 }
 
 static int preinit(struct vo *vo) {
@@ -208,7 +225,9 @@ static int preinit(struct vo *vo) {
 
     int width, height;
     get_current_resolution(&width, &height);
-    resize(priv, width, height);
+    resize(vo, width, height);
+
+    appletHook(&priv->hook_cookie, handle_applet_hook, vo);
 
     return 0;
 }
@@ -293,18 +312,10 @@ static void flip_page(struct vo *vo) {
     dkQueuePresentImage(priv->queue, priv->swapchain, slot);
 }
 
-// static void wakeup(struct vo *vo) {
-//     MP_VERBOSE(vo, "wakeup\n");
-// }
-
-// static void wait_events(struct vo *vo, int64_t until_time_us) {
-//     MP_VERBOSE(vo, "wait_events\n");
-// }
-
 static void uninit(struct vo *vo) {
     struct priv *priv = vo->priv;
 
-    MP_VERBOSE(vo, "uninit\n");
+    MP_VERBOSE(vo, "Deinitializing hos video\n");
 
     dkQueueWaitIdle(priv->queue);
 
@@ -316,6 +327,8 @@ static void uninit(struct vo *vo) {
     dkMemBlockDestroy(priv->cmdbuf_memblock);
     dkSwapchainDestroy(priv->swapchain);
     dkDeviceDestroy(priv->device);
+
+    appletUnhook(&priv->hook_cookie);
 }
 
 #define OPT_BASE_STRUCT struct priv
@@ -334,8 +347,6 @@ const struct vo_driver video_out_hos = {
     .control        = control,
     .draw_frame     = draw_frame,
     .flip_page      = flip_page,
-    // .wakeup         = wakeup,
-    // .wait_events    = wait_events,
     .uninit         = uninit,
     .options_prefix = "vo-hos",
 };
