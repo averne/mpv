@@ -818,6 +818,12 @@ video_output_features = [
         'desc': 'drmIsKMS() function',
         'deps': 'drm',
         'func': check_pkg_config('libdrm', '>= 2.4.105'),
+    }, {
+        'name': '--hos-video',
+        'desc': 'deko3d video output',
+        'deps': 'hos',
+        'func': check_cc(header_name='deko3d.h',
+                         lib='deko3dd'),
     }
 ]
 

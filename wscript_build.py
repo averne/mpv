@@ -530,6 +530,7 @@ def build(ctx):
         ( "video/out/vo_wlshm.c",                "wayland && memfd_create" ),
         ( "video/out/vo_x11.c" ,                 "x11" ),
         ( "video/out/vo_xv.c",                   "xv" ),
+        ( "video/out/vo_hos.c",                  "hos-video" ),
         ( "video/out/vulkan/context.c",          "vulkan" ),
         ( "video/out/vulkan/context_display.c",  "vulkan" ),
         ( "video/out/vulkan/context_android.c",  "vulkan && android" ),
