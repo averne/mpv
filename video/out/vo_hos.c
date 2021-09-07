@@ -111,8 +111,8 @@ static void resize(struct vo *vo, int width, int height) {
 
     DkImageLayoutMaker fb_layout_maker;
     dkImageLayoutMakerDefaults(&fb_layout_maker, priv->device);
-    fb_layout_maker.flags = DkImageFlags_UsageRender | DkImageFlags_UsagePresent |
-        DkImageFlags_HwCompression | DkImageFlags_Usage2DEngine;
+    fb_layout_maker.flags = DkImageFlags_UsageRender |
+        DkImageFlags_UsagePresent |  DkImageFlags_Usage2DEngine;
     fb_layout_maker.format = DkImageFormat_RGBA8_Unorm;
     fb_layout_maker.dimensions[0] = width;
     fb_layout_maker.dimensions[1] = height;
@@ -137,7 +137,8 @@ static void resize(struct vo *vo, int width, int height) {
 
     priv->screen_width = width, priv->screen_height = height;
 
-    regen_cmdlists(priv);
+    if (priv->frame_width && priv->frame_height)
+        regen_cmdlists(priv);
 }
 
 static void handle_applet_hook(AppletHookType type, void *param) {
@@ -200,28 +201,6 @@ static int preinit(struct vo *vo) {
     dkQueueMakerDefaults(&queue_maker, priv->device);
     queue_maker.flags = DkQueueFlags_Graphics;
     priv->queue = dkQueueCreate(&queue_maker);
-
-    DkImageLayoutMaker frame_layout_maker;
-    dkImageLayoutMakerDefaults(&frame_layout_maker, priv->device);
-    frame_layout_maker.flags = DkImageFlags_Usage2DEngine;
-    frame_layout_maker.format = DkImageFormat_RGBA8_Unorm;
-    frame_layout_maker.dimensions[0] = MAX_WIDTH;
-    frame_layout_maker.dimensions[1] = MAX_HEIGHT;
-
-    DkImageLayout frame_layout;
-    dkImageLayoutInitialize(&frame_layout, &frame_layout_maker);
-
-    size_t frame_size = MP_ALIGN_UP(dkImageLayoutGetSize(&frame_layout),
-        dkImageLayoutGetAlignment(&frame_layout));
-
-    dkMemBlockMakerDefaults(&memblock_maker, priv->device, frame_size);
-    memblock_maker.flags = DkMemBlockFlags_CpuUncached |
-        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
-    priv->frame_memblock = dkMemBlockCreate(&memblock_maker);
-
-    dkImageInitialize(&priv->frame, &frame_layout, priv->frame_memblock, 0);
-
-    priv->frame_width = MAX_WIDTH, priv->frame_height = MAX_HEIGHT;
 
     int width, height;
     get_current_resolution(&width, &height);
