@@ -177,7 +177,7 @@ static bool mp_image_alloc_planes(struct mp_image *mpi)
         return false;
 
     // Note: mp_image_pool assumes this creates only 1 AVBufferRef.
-    mpi->bufs[0] = av_buffer_aligned_alloc(size + align, 0x100); // Aligmnent required for plane offsets
+    mpi->bufs[0] = av_buffer_aligned_alloc(size + align, 0x1000); // Aligmnent required for gpu copy engine
     if (!mpi->bufs[0])
         return false;
 

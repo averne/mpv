@@ -35,14 +35,14 @@
 #define MAX_WIDTH     1920
 #define MAX_HEIGHT    1080
 #define NUM_FB_IMAGES 2
-#define CMDBUF_SIZE   2 * DK_MEMBLOCK_ALIGNMENT
+#define CMDBUF_SIZE   DK_MEMBLOCK_ALIGNMENT
 
 struct priv {
     DkDevice    device;
     DkMemBlock  fb_memblock, frame_memblock,
         transfer_memblock, cmdbuf_memblock;
     DkSwapchain swapchain;
-    DkCmdBuf    fb_cmdbuf, frame_cmdbuf;
+    DkCmdBuf    render_cmdbuf, transfer_cmdbuf;
     DkQueue     queue;
 
     DkImage frame;
@@ -52,7 +52,8 @@ struct priv {
     DkCmdList render_cmdlists[NUM_FB_IMAGES];
     DkCmdList bind_fb_cmdlists[NUM_FB_IMAGES];
 
-    int width, height;
+    int frame_width,  frame_height;
+    int screen_width, screen_height;
 };
 
 static void get_current_resolution(int *width, int *height) {
@@ -67,11 +68,38 @@ static void get_current_resolution(int *width, int *height) {
     }
 }
 
+static void regen_cmdlists(struct priv *priv) {
+    dkCmdBufClear(priv->render_cmdbuf);
+
+    int scaled_width = priv->frame_width * priv->screen_height / priv->frame_height;
+    int horiz_offset = (priv->screen_width - scaled_width) / 2;
+
+    DkImageView frame_view;
+    dkImageViewDefaults(&frame_view, &priv->frame);
+
+    for (int i = 0; i < NUM_FB_IMAGES; ++i) {
+        DkImageView fb_view;
+        dkImageViewDefaults(&fb_view, &priv->framebuffer_images[i]);
+
+        dkCmdBufBindRenderTarget(priv->render_cmdbuf, &fb_view, NULL);
+        priv->bind_fb_cmdlists[i] = dkCmdBufFinishList(priv->render_cmdbuf);
+
+        dkCmdBufSetViewports(priv->render_cmdbuf, 0,
+            &(DkViewport){0.0f, 0.0f, priv->screen_width, priv->screen_height, 0.0f, 1.0f}, 1);
+        dkCmdBufSetScissors(priv->render_cmdbuf, 0,
+            &(DkScissor){0, 0, priv->screen_width, priv->screen_height}, 1);
+        dkCmdBufClearColorFloat(priv->render_cmdbuf, 0, DkColorMask_RGBA,
+            0.0f, 0.0f, 0.0f, 1.0f);
+        dkCmdBufBlitImage(priv->render_cmdbuf,
+            &frame_view, &(DkImageRect){0, 0, 0, priv->frame_width, priv->frame_height, 1},
+            &fb_view,    &(DkImageRect){horiz_offset, 0, 0, scaled_width, priv->screen_height, 1}, 0, 0);
+        priv->render_cmdlists[i] = dkCmdBufFinishList(priv->render_cmdbuf);
+    }
+}
+
 static void resize(struct priv *priv, int width, int height) {
     if (priv->swapchain)
         dkSwapchainDestroy(priv->swapchain);
-
-    dkCmdBufClear(priv->fb_cmdbuf);
 
     DkImageLayoutMaker fb_layout_maker;
     dkImageLayoutMakerDefaults(&fb_layout_maker, priv->device);
@@ -99,14 +127,9 @@ static void resize(struct priv *priv, int width, int height) {
         swapchain_images, MP_ARRAY_SIZE(swapchain_images));
     priv->swapchain = dkSwapchainCreate(&swapchain_maker);
 
-    for (int i = 0; i < MP_ARRAY_SIZE(priv->framebuffer_images); ++i) {
-        DkImageView image_view;
-        dkImageViewDefaults(&image_view, &priv->framebuffer_images[i]);
-        dkCmdBufBindRenderTarget(priv->fb_cmdbuf, &image_view, NULL);
-        priv->bind_fb_cmdlists[i] = dkCmdBufFinishList(priv->fb_cmdbuf);
-    }
+    priv->screen_width = width, priv->screen_height = height;
 
-    priv->width = width, priv->height = height;
+    regen_cmdlists(priv);
 }
 
 static int preinit(struct vo *vo) {
@@ -145,21 +168,43 @@ static int preinit(struct vo *vo) {
     priv->cmdbuf_memblock = dkMemBlockCreate(&memblock_maker);
 
     dkCmdBufMakerDefaults(&cmdbuf_maker, priv->device);
-    priv->fb_cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
+    priv->render_cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
 
-    dkCmdBufAddMemory(priv->fb_cmdbuf, priv->cmdbuf_memblock, 0,
+    dkCmdBufAddMemory(priv->render_cmdbuf, priv->cmdbuf_memblock, 0,
         dkMemBlockGetSize(priv->cmdbuf_memblock));
 
     dkCmdBufMakerDefaults(&cmdbuf_maker, priv->device);
-    priv->frame_cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
+    priv->transfer_cmdbuf = dkCmdBufCreate(&cmdbuf_maker);
 
-    dkCmdBufAddMemory(priv->frame_cmdbuf, priv->cmdbuf_memblock, CMDBUF_SIZE,
+    dkCmdBufAddMemory(priv->transfer_cmdbuf, priv->cmdbuf_memblock, CMDBUF_SIZE,
         dkMemBlockGetSize(priv->cmdbuf_memblock));
 
     DkQueueMaker queue_maker;
     dkQueueMakerDefaults(&queue_maker, priv->device);
     queue_maker.flags = DkQueueFlags_Graphics;
     priv->queue = dkQueueCreate(&queue_maker);
+
+    DkImageLayoutMaker frame_layout_maker;
+    dkImageLayoutMakerDefaults(&frame_layout_maker, priv->device);
+    frame_layout_maker.flags = DkImageFlags_Usage2DEngine;
+    frame_layout_maker.format = DkImageFormat_RGBA8_Unorm;
+    frame_layout_maker.dimensions[0] = MAX_WIDTH;
+    frame_layout_maker.dimensions[1] = MAX_HEIGHT;
+
+    DkImageLayout frame_layout;
+    dkImageLayoutInitialize(&frame_layout, &frame_layout_maker);
+
+    size_t frame_size = MP_ALIGN_UP(dkImageLayoutGetSize(&frame_layout),
+        dkImageLayoutGetAlignment(&frame_layout));
+
+    dkMemBlockMakerDefaults(&memblock_maker, priv->device, frame_size);
+    memblock_maker.flags = DkMemBlockFlags_CpuUncached |
+        DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
+    priv->frame_memblock = dkMemBlockCreate(&memblock_maker);
+
+    dkImageInitialize(&priv->frame, &frame_layout, priv->frame_memblock, 0);
+
+    priv->frame_width = MAX_WIDTH, priv->frame_height = MAX_HEIGHT;
 
     int width, height;
     get_current_resolution(&width, &height);
@@ -178,18 +223,6 @@ static int reconfig2(struct vo *vo, struct mp_image *img) {
     if (priv->frame_memblock)
         dkMemBlockDestroy(priv->frame_memblock);
 
-    if (priv->transfer_memblock)
-        dkMemBlockDestroy(priv->transfer_memblock);
-
-    dkCmdBufClear(priv->frame_cmdbuf);
-
-    DkMemBlockMaker memblock_maker;
-
-    dkMemBlockMakerDefaults(&memblock_maker, priv->device,
-        MP_ALIGN_UP(img->stride[0] * img->h, DK_MEMBLOCK_ALIGNMENT));
-    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
-    priv->transfer_memblock = dkMemBlockCreate(&memblock_maker);
-
     DkImageLayoutMaker frame_layout_maker;
     dkImageLayoutMakerDefaults(&frame_layout_maker, priv->device);
     frame_layout_maker.flags = DkImageFlags_Usage2DEngine;
@@ -203,6 +236,7 @@ static int reconfig2(struct vo *vo, struct mp_image *img) {
     size_t frame_size = MP_ALIGN_UP(dkImageLayoutGetSize(&frame_layout),
         dkImageLayoutGetAlignment(&frame_layout));
 
+    DkMemBlockMaker memblock_maker;
     dkMemBlockMakerDefaults(&memblock_maker, priv->device, frame_size);
     memblock_maker.flags = DkMemBlockFlags_CpuUncached |
         DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
@@ -210,32 +244,9 @@ static int reconfig2(struct vo *vo, struct mp_image *img) {
 
     dkImageInitialize(&priv->frame, &frame_layout, priv->frame_memblock, 0);
 
-    DkImageView frame_view;
-    dkImageViewDefaults(&frame_view, &priv->frame);
+    priv->frame_width = img->w, priv->frame_height = img->h;
 
-    int scaled_width = img->w * priv->height / img->h;
-    int horiz_offset = (priv->width - scaled_width) / 2;
-
-    for (int i = 0; i < NUM_FB_IMAGES; ++i) {
-        DkImageView fb_view;
-        dkImageViewDefaults(&fb_view, &priv->framebuffer_images[i]);
-
-        dkCmdBufSetViewports(priv->frame_cmdbuf, 0,
-            &(DkViewport){0.0f, 0.0f, priv->width, priv->height, 0.0f, 1.0f}, 1);
-        dkCmdBufSetScissors(priv->frame_cmdbuf, 0,
-            &(DkScissor){0, 0, priv->width, priv->height}, 1);
-        dkCmdBufClearColorFloat(priv->frame_cmdbuf, 0, DkColorMask_RGBA,
-            0.0f, 0.0f, 0.0f, 1.0f);
-        dkCmdBufBlitImage(priv->frame_cmdbuf,
-            &frame_view, &(DkImageRect){0, 0, 0, img->w, img->h, 1},
-            &fb_view,    &(DkImageRect){horiz_offset, 0, 0, scaled_width, priv->height, 1}, 0, 0);
-        priv->render_cmdlists[i] = dkCmdBufFinishList(priv->frame_cmdbuf);
-    }
-
-    dkCmdBufCopyBufferToImage(priv->frame_cmdbuf,
-        &(DkCopyBuf){dkMemBlockGetGpuAddr(priv->transfer_memblock), img->stride[0], img->h},
-        &frame_view, &(DkImageRect){0, 0, 0, img->w, img->h, 1}, 0);
-    priv->transfer_cmdlist = dkCmdBufFinishList(priv->frame_cmdbuf);
+    regen_cmdlists(priv);
 
     return 0;
 }
@@ -246,21 +257,37 @@ static int control(struct vo *vo, uint32_t request, void *data) {
 }
 
 static void draw_frame(struct vo *vo, struct vo_frame *frame) {
-    struct priv *priv = vo->priv;
+    struct mp_image *img = frame->current;
+    struct priv    *priv = vo->priv;
 
-    memcpy(dkMemBlockGetCpuAddr(priv->transfer_memblock), frame->current->planes[0],
-        frame->current->stride[0] * frame->current->h);
+    dkCmdBufClear(priv->transfer_cmdbuf);
+
+    DkMemBlockMaker memblock_maker;
+    dkMemBlockMakerDefaults(&memblock_maker, priv->device,
+        MP_ALIGN_UP(img->stride[0] * img->h, DK_MEMBLOCK_ALIGNMENT));
+    memblock_maker.storage = img->planes[0];
+    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+    priv->transfer_memblock = dkMemBlockCreate(&memblock_maker);
+
+    DkImageView frame_view;
+    dkImageViewDefaults(&frame_view, &priv->frame);
+
+    dkCmdBufCopyBufferToImage(priv->transfer_cmdbuf,
+        &(DkCopyBuf){dkMemBlockGetGpuAddr(priv->transfer_memblock), img->stride[0], img->h},
+        &frame_view, &(DkImageRect){0, 0, 0, img->w, img->h, 1}, 0);
+    priv->transfer_cmdlist = dkCmdBufFinishList(priv->transfer_cmdbuf);
+
     dkQueueSubmitCommands(priv->queue, priv->transfer_cmdlist);
 }
 
 static void flip_page(struct vo *vo) {
     struct priv *priv = vo->priv;
 
-    int slot = dkQueueAcquireImage(priv->queue, priv->swapchain);
-
     // Wait for the frame transfer to complete
     dkQueueWaitIdle(priv->queue);
+    dkMemBlockDestroy(priv->transfer_memblock);
 
+    int slot = dkQueueAcquireImage(priv->queue, priv->swapchain);
     dkQueueSubmitCommands(priv->queue, priv->bind_fb_cmdlists[slot]);
     dkQueueSubmitCommands(priv->queue, priv->render_cmdlists[slot]);
     dkQueuePresentImage(priv->queue, priv->swapchain, slot);
@@ -282,8 +309,8 @@ static void uninit(struct vo *vo) {
     dkQueueWaitIdle(priv->queue);
 
     dkQueueDestroy(priv->queue);
-    dkCmdBufDestroy(priv->fb_cmdbuf);
-    dkCmdBufDestroy(priv->frame_cmdbuf);
+    dkCmdBufDestroy(priv->render_cmdbuf);
+    dkMemBlockDestroy(priv->transfer_memblock);
     dkMemBlockDestroy(priv->frame_memblock);
     dkMemBlockDestroy(priv->fb_memblock);
     dkMemBlockDestroy(priv->cmdbuf_memblock);
