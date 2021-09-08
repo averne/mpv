@@ -48,6 +48,8 @@ struct priv {
     DkImage frame;
     DkImage framebuffer_images[NUM_FB_IMAGES];
 
+    DkFence transfer_fence;
+
     DkCmdList transfer_cmdlist;
     DkCmdList render_cmdlists[NUM_FB_IMAGES];
     DkCmdList bind_fb_cmdlists[NUM_FB_IMAGES];
@@ -276,13 +278,15 @@ static void draw_frame(struct vo *vo, struct vo_frame *frame) {
     priv->transfer_cmdlist = dkCmdBufFinishList(priv->transfer_cmdbuf);
 
     dkQueueSubmitCommands(priv->queue, priv->transfer_cmdlist);
+    dkQueueSignalFence(priv->queue, &priv->transfer_fence, true);
+    dkQueueFlush(priv->queue);
 }
 
 static void flip_page(struct vo *vo) {
     struct priv *priv = vo->priv;
 
     // Wait for the frame transfer to complete
-    dkQueueWaitIdle(priv->queue);
+    dkFenceWait(&priv->transfer_fence, -1);
     dkMemBlockDestroy(priv->transfer_memblock);
 
     int slot = dkQueueAcquireImage(priv->queue, priv->swapchain);
