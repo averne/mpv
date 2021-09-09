@@ -90,7 +90,6 @@ static const struct ao_driver * const audio_out_drivers[] = {
     &audio_out_sdl,
 #endif
 #if HAVE_HOS_AUDIO
-    #warning "test"
     &audio_out_hos,
 #endif
     &audio_out_null,
