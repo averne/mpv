@@ -839,7 +839,11 @@ static int preinit(struct vo *vo)
     struct gl_video_opts *gl_opts = p->opts_cache->opts;
     struct ra_ctx_opts *ctx_opts = mp_get_config_group(p, vo->global, &ra_ctx_conf);
     struct ra_ctx_opts opts = *ctx_opts;
+#ifdef __SWITCH__
+    opts.context_type = "deko3d";
+#else
     opts.context_type = "vulkan";
+#endif
     opts.context_name = NULL;
     opts.want_alpha = gl_opts->alpha_mode == 1;
     p->ra_ctx = ra_ctx_create(vo, opts);
@@ -847,6 +851,14 @@ static int preinit(struct vo *vo)
         goto err_out;
 
 #if HAVE_VULKAN
+    struct mpvk_ctx *vkctx = ra_vk_ctx_get(p->ra_ctx);
+    if (vkctx) {
+        p->pllog = vkctx->ctx;
+        p->gpu = vkctx->gpu;
+        p->sw = vkctx->swapchain;
+        goto done;
+    }
+#elif HAVE_DEKO3D
     struct mpvk_ctx *vkctx = ra_vk_ctx_get(p->ra_ctx);
     if (vkctx) {
         p->pllog = vkctx->ctx;

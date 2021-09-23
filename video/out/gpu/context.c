@@ -55,6 +55,9 @@ extern const struct ra_ctx_fns ra_ctx_vulkan_display;
 /* Direct3D 11 */
 extern const struct ra_ctx_fns ra_ctx_d3d11;
 
+/* deko3d */
+extern const struct ra_ctx_fns ra_ctx_deko3d;
+
 static const struct ra_ctx_fns *contexts[] = {
 #if HAVE_D3D11
     &ra_ctx_d3d11,
@@ -90,6 +93,9 @@ static const struct ra_ctx_fns *contexts[] = {
 #endif
 #if HAVE_EGL_DRM
     &ra_ctx_drm_egl,
+#endif
+#if HAVE_DEKO3D
+    &ra_ctx_deko3d,
 #endif
 
 // Vulkan contexts:

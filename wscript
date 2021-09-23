@@ -769,6 +769,11 @@ video_output_features = [
         'name': '--sixel',
         'desc': 'Sixel',
         'func': check_pkg_config('libsixel', '>= 1.5'),
+    }, {
+        'name': '--deko3d',
+        'desc': 'deko3d',
+        'deps': 'hos',
+        'func': check_cc(header_name='deko3d.h'),
     }
 ]
 

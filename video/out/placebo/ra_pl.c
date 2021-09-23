@@ -38,6 +38,7 @@ struct ra *ra_create_pl(const struct pl_gpu *gpu, struct mp_log *log)
     ra->glsl_version = gpu->glsl.version;
     ra->glsl_vulkan = gpu->glsl.vulkan;
     ra->glsl_es = gpu->glsl.gles;
+    ra->glsl_deko3d = gpu->glsl.deko3d;
 
     ra->caps = RA_CAP_DIRECT_UPLOAD | RA_CAP_NESTED_ARRAY | RA_CAP_FRAGCOORD;
 

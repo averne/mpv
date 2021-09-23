@@ -513,6 +513,7 @@ def build(ctx):
         ( "video/out/vulkan/context_xlib.c",     "vulkan && x11" ),
         ( "video/out/vulkan/utils.c",            "vulkan" ),
         ( "video/out/w32_common.c",              "win32-desktop" ),
+        ( "video/out/deko3d/context.c",          "deko3d" ),
         ( "generated/wayland/idle-inhibit-unstable-v1.c", "wayland" ),
         ( "generated/wayland/presentation-time.c", "wayland" ),
         ( "generated/wayland/xdg-decoration-unstable-v1.c", "wayland" ),
