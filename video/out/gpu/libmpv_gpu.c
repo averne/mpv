@@ -6,6 +6,9 @@
 #include "video/out/libmpv.h"
 
 static const struct libmpv_gpu_context_fns *context_backends[] = {
+#if HAVE_DEKO3D
+    &libmpv_gpu_context_dk,
+#endif
 #if HAVE_GL
     &libmpv_gpu_context_gl,
 #endif

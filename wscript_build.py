@@ -509,6 +509,9 @@ def build(ctx):
         ( "video/out/wldmabuf/context_wldmabuf.c", "dmabuf-wayland" ),
         ( "video/out/wldmabuf/ra_wldmabuf.c",      "dmabuf-wayland" ),
         ( "video/out/wlbuf_pool.c",                "dmabuf-wayland" ),
+        ( "video/out/deko3d/context.c",          "deko3d" ),
+        ( "video/out/deko3d/ra_dk.c",            "deko3d" ),
+        ( "video/out/deko3d/libmpv_dk.c",        "deko3d" ),
         ( "video/out/vo.c" ),
         ( "video/out/vo_caca.c",                 "caca" ),
         ( "video/out/vo_direct3d.c",             "direct3d" ),
@@ -737,7 +740,7 @@ def build(ctx):
         )
 
         headers = ["client.h", "render.h",
-                   "render_gl.h", "stream_cb.h"]
+                   "render_gl.h", "stream_cb.h", "render_dk3d.h"]
         for f in headers:
             ctx.install_as(ctx.env.INCLUDEDIR + '/mpv/' + f, 'libmpv/' + f)
 

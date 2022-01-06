@@ -11,6 +11,7 @@ struct ra {
     int glsl_version;       // GLSL version (e.g. 300 => 3.0)
     bool glsl_es;           // use ES dialect
     bool glsl_vulkan;       // use vulkan dialect
+    bool glsl_deko3d;       // use deko3d dialect
 
     struct mp_log *log;
 

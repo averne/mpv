@@ -421,6 +421,17 @@ typedef enum mpv_render_param_type {
      * See MPV_RENDER_PARAM_SW_STRIDE for alignment requirements.
      */
     MPV_RENDER_PARAM_SW_POINTER = 20,
+    /**
+     * Required parameters for initializing the deko3d renderer. Valid for
+     * mpv_render_context_create().
+     * Type: mpv_deko3d_init_params*
+     */
+    MPV_RENDER_PARAM_DEKO3D_INIT_PARAMS = 21,
+    /**
+     * Describes a deko3d render target. Valid for mpv_render_context_render().
+     * Type: DkImage*
+     */
+    MPV_RENDER_PARAM_DEKO3D_FBO = 22,
 } mpv_render_param_type;
 
 /**
@@ -465,6 +476,8 @@ typedef struct mpv_render_param {
  */
 // See render_gl.h
 #define MPV_RENDER_API_TYPE_OPENGL "opengl"
+// See render_dk3d.h
+#define MPV_RENDER_API_TYPE_DEKO3D "deko3d"
 // See section "Software renderer"
 #define MPV_RENDER_API_TYPE_SW "sw"
 
