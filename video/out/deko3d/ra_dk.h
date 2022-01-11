@@ -18,6 +18,15 @@ struct ra_tex_dk {
     DkMemBlock memblock;
     DkImage image;
     DkImageFormat fmt;
+    DkFence fence;
+};
+
+struct ra_buf_dk {
+    DkMemBlock memblock;
+};
+
+struct ra_rpass_dk {
+
 };
 
 struct ra *ra_create_dk(mp_dk_ctx *dk, struct mp_log *log);

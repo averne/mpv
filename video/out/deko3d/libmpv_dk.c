@@ -87,11 +87,28 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
 }
 
 static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
+    struct priv          *priv = ctx->priv;
+    struct ra_tex_dk *tex_priv = priv->cur_fbo->priv;
+
     MP_VERBOSE(ctx, "%s\n", __func__);
+
+    // Wait for the rendering to complete before clearing the state
+    dkFenceWait(&tex_priv->fence, -1);
+
+    dkCmdBufClear(priv->dk->cmdbuf);
+
+    for (int i = 0; i < priv->dk->num_tmp_memblocks; ++i)
+        dkMemBlockDestroy(priv->dk->tmp_memblocks[i]);
+    priv->dk->num_tmp_memblocks = 0;
 }
 
 static void destroy(struct libmpv_gpu_context *ctx) {
+    struct priv *p = ctx->priv;
+
     MP_VERBOSE(ctx, "Destroying libmpv deko3d context\n");
+
+    if (p->ra_ctx)
+        ra_dk_ctx_uninit(p->ra_ctx);
 }
 
 const struct libmpv_gpu_context_fns libmpv_gpu_context_dk = {
