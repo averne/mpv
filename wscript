@@ -824,6 +824,14 @@ video_output_features = [
         'deps': 'hos',
         'func': check_cc(header_name='deko3d.h',
                          lib='deko3dd'),
+    }, {
+        'name': '--deko3d',
+        'desc': 'deko3d context support',
+        'deps': 'hos && gpl',
+        'func': compose_checks(
+                    check_cc(header_name='deko3d.h', lib='deko3d'),
+                    check_pkg_config('uam'),
+                ),
     }
 ]
 
