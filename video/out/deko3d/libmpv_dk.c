@@ -87,13 +87,14 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
 }
 
 static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
-    struct priv          *priv = ctx->priv;
-    struct ra_tex_dk *tex_priv = priv->cur_fbo->priv;
+    struct priv *priv = ctx->priv;
 
     MP_VERBOSE(ctx, "%s\n", __func__);
 
     // Wait for the rendering to complete before clearing the state
-    dkFenceWait(&tex_priv->fence, -1);
+    // TODO: is there a better way than to use dkQueueWaitIdle? (semaphore with DkVariable?)
+    // But since frame rendering is sequential it shouldn't matter
+    dkQueueWaitIdle(priv->dk->queue);
 
     dkCmdBufClear(priv->dk->cmdbuf);
 

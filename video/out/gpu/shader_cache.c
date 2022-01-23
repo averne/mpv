@@ -272,10 +272,11 @@ static void update_uniform_params(struct gl_shader_cache *sc, struct sc_uniform 
     // Try not using push constants for "large" values like matrices, since
     // this is likely to both exceed the VGPR budget as well as the pushc size
     // budget
-    bool try_pushc = u->input.dim_m == 1 || dynamic;
+    // In deko3d, push constants have the same semantics as uniform buffers
+    bool try_pushc = (sc->ra->glsl_deko3d || u->input.dim_m == 1) || dynamic;
 
     // Attempt using push constants first
-    if (try_pushc && sc->ra->glsl_vulkan && sc->ra->max_pushc_size) {
+    if (try_pushc && (sc->ra->glsl_vulkan || sc->ra->glsl_deko3d) && sc->ra->max_pushc_size) {
         struct ra_layout layout = sc->ra->fns->push_constant_layout(&u->input);
         size_t offset = MP_ALIGN_UP(sc->pushc_size, layout.align);
         // Push constants have limited size, so make sure we don't exceed this
@@ -706,7 +707,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
             // source. For OpenGL it's optional, but requires higher GL version
             // so we don't do it (and instead have ra_gl update the bindings
             // after program creation).
-            if (sc->ra->glsl_vulkan)
+            if (sc->ra->glsl_vulkan || sc->ra->glsl_deko3d)
                 ADD(dst, "layout(binding=%d) ", u->input.binding);
             ADD(dst, "uniform %s %s;\n", u->glsl_type, u->input.name);
             break;
@@ -723,7 +724,7 @@ static void add_uniforms(struct gl_shader_cache *sc, bstr *dst)
             // type of data we will be reading/writing to this image.
             const char *fmt = u->v.tex->params.format->glsl_format;
 
-            if (sc->ra->glsl_vulkan) {
+            if (sc->ra->glsl_vulkan || sc->ra->glsl_deko3d) {
                 if (fmt) {
                     ADD(dst, "layout(binding=%d, %s) ", u->input.binding, fmt);
                 } else {
