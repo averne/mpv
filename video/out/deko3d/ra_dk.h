@@ -36,7 +36,6 @@ struct dk_format {
 struct ra_tex_dk {
     DkMemBlock memblock;
     DkImage image;
-    DkImageFormat fmt;
     DkFence fence;
 
     int descriptor_idx;
@@ -62,3 +61,5 @@ struct ra_rpass_dk {
 };
 
 struct ra *ra_create_dk(mp_dk_ctx *dk, struct mp_log *log);
+mp_dk_ctx *ra_dk_get_ctx(struct ra *ra);
+void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex);

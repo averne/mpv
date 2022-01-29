@@ -512,6 +512,7 @@ def build(ctx):
         ( "video/out/deko3d/context.c",          "deko3d" ),
         ( "video/out/deko3d/ra_dk.c",            "deko3d" ),
         ( "video/out/deko3d/libmpv_dk.c",        "deko3d" ),
+        ( "video/out/hwdec/hwdec_deko3d.c",      "deko3d" ),
         ( "video/out/vo.c" ),
         ( "video/out/vo_caca.c",                 "caca" ),
         ( "video/out/vo_direct3d.c",             "direct3d" ),

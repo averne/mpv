@@ -77,9 +77,7 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
     priv->cur_fbo->params.blit_dst   = true;
 
     struct ra_tex_dk *priv_tex = priv->cur_fbo->priv;
-    priv_tex->fmt   = fbo->format;
     priv_tex->image = *fbo->tex;
-    priv_tex->fmt   = fbo->format;
 
     *out = priv->cur_fbo;
 

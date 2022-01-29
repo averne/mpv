@@ -123,6 +123,11 @@ static DkVtxAttribSize map_vertex_attrib_size(enum ra_vartype type, int dim_v, i
     return -1;
 }
 
+mp_dk_ctx *ra_dk_get_ctx(struct ra *ra) {
+    struct priv *priv = ra->priv;
+    return priv->dk;
+}
+
 static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     struct priv *priv = ra->priv = talloc_zero(NULL, struct priv);
     priv->dk = dk;
@@ -210,7 +215,6 @@ static void dk_destroy(struct ra *ra) {
 
     MP_VERBOSE(ra, "%s\n", __func__);
 
-    dkQueueFlush(priv->dk->queue);
     dkQueueWaitIdle(priv->dk->queue);
     dkQueueDestroy(priv->dk->queue);
 
@@ -224,6 +228,38 @@ static void dk_destroy(struct ra *ra) {
         dkMemBlockDestroy(priv->dk->tmp_memblocks[i]);
 
     talloc_free(priv);
+}
+
+
+void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
+    struct priv          *priv = ra->priv;
+    struct ra_tex_dk *tex_priv = tex->priv;
+
+    DkImageDescriptor   *image_descs   = dkMemBlockGetCpuAddr(priv->image_descriptors);
+    DkSamplerDescriptor *sampler_descs = dkMemBlockGetCpuAddr(priv->sampler_descriptors);
+
+    DkImageView image_view;
+    dkImageViewDefaults(&image_view, &tex_priv->image);
+
+    dkImageDescriptorInitialize(&image_descs[priv->num_descriptors], &image_view, tex->params.storage_dst, false);
+
+    DkSampler sampler;
+    dkSamplerDefaults(&sampler);
+
+    sampler.compareEnable = false;
+    sampler.compareOp = DkCompareOp_Never;
+    sampler.wrapMode[0] = sampler.wrapMode[1] = sampler.wrapMode[2] =
+        tex->params.src_repeat ? DkWrapMode_Repeat : DkWrapMode_Clamp;
+
+    if (tex->params.src_repeat)
+        sampler.minFilter = sampler.magFilter = DkFilter_Linear,
+            sampler.mipFilter = DkMipFilter_Linear;
+
+    dkSamplerDescriptorInitialize(&sampler_descs[priv->num_descriptors], &sampler);
+
+    tex_priv->descriptor_idx = priv->num_descriptors++;
+
+    dkQueueSignalFence(priv->dk->queue, &tex_priv->fence, false);
 }
 
 static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *params) {
@@ -279,31 +315,7 @@ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *p
 
     dkImageInitialize(&tex_priv->image, &tex_layout, tex_priv->memblock, 0);
 
-    DkImageDescriptor   *image_descs   = dkMemBlockGetCpuAddr(priv->image_descriptors);
-    DkSamplerDescriptor *sampler_descs = dkMemBlockGetCpuAddr(priv->sampler_descriptors);
-
-    DkImageView image_view;
-    dkImageViewDefaults(&image_view, &tex_priv->image);
-
-    dkImageDescriptorInitialize(&image_descs[priv->num_descriptors], &image_view, params->storage_dst, false);
-
-    DkSampler sampler;
-    dkSamplerDefaults(&sampler);
-
-    sampler.compareEnable = false;
-    sampler.compareOp = DkCompareOp_Never;
-    sampler.wrapMode[0] = sampler.wrapMode[1] = sampler.wrapMode[2] =
-        params->src_repeat ? DkWrapMode_Repeat : DkWrapMode_Clamp;
-
-    if (params->src_linear)
-        sampler.minFilter = sampler.magFilter = DkFilter_Linear,
-            sampler.mipFilter = DkMipFilter_Linear;
-
-    dkSamplerDescriptorInitialize(&sampler_descs[priv->num_descriptors], &sampler);
-
-    tex_priv->descriptor_idx = priv->num_descriptors++;
-
-    dkQueueSignalFence(priv->dk->queue, &tex_priv->fence, false);
+    ra_dk_register_texture(ra, tex);
 
     return tex;
 }
@@ -610,8 +622,10 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
         }
     }
 
-    if (params->pass->params.enable_blend)
+    if (params->pass->params.enable_blend) {
+        dkColorStateSetBlendEnable(&pass_priv->color_state, 0, true);
         dkCmdBufBindBlendState(priv->dk->cmdbuf, 0, &pass_priv->blend_state);
+    }
 
     dkCmdBufBindRenderTarget(priv->dk->cmdbuf, &tex_view, NULL);
     dkCmdBufSetViewports(priv->dk->cmdbuf, 0, &dkviewport, 1);
