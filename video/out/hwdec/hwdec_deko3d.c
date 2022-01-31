@@ -35,6 +35,7 @@ struct priv_owner {
     struct mp_hwdec_ctx hwctx;
 };
 
+// Arrays hardcoded to two members since only NV12 is supported
 struct priv {
     mp_dk_ctx *dk;
     DkImageLayout dklayouts[2];
@@ -140,8 +141,10 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
 
     MP_VERBOSE(mapper, "%s\n", __func__);
 
-    for (int i = 0; i < priv->num_cached_textures; ++i)
-        dkMemBlockDestroy(priv->cached_textures[i].memblock);
+    for (int i = 0; i < priv->num_cached_textures; ++i) {
+        if (priv->cached_textures[i].memblock)
+            dkMemBlockDestroy(priv->cached_textures[i].memblock);
+    }
 }
 
 static int mapper_map(struct ra_hwdec_mapper *mapper) {
@@ -152,14 +155,11 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
 
     for (int i = 0; i < priv->num_cached_textures; ++i) {
         if (priv->cached_textures[i].handle == ff_tx1_map_get_handle(map)) {
-            MP_VERBOSE(mapper, "Found cached texture for map %#x\n", ff_tx1_map_get_handle(map));
             mapper->tex[0]->priv = priv->cached_textures[i].tex[0];
             mapper->tex[1]->priv = priv->cached_textures[i].tex[1];
             return 0;
         }
     }
-
-    MP_VERBOSE(mapper, "Creating mapped texture for map %#x\n", ff_tx1_map_get_handle(map));
 
     struct cached_texture cache;
     cache.handle = ff_tx1_map_get_handle(map);
@@ -170,10 +170,8 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
         DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
     memblock_maker.storage = ff_tx1_map_get_addr(map);
     cache.memblock = dkMemBlockCreate(&memblock_maker);
-    if (!cache.memblock) {
-        MP_ERR(mapper, "Failed to create memblock\n");
+    if (!cache.memblock)
         return -1;
-    }
 
     for (int i = 0; i < MP_ARRAY_SIZE(priv->dklayouts); ++i) {
         DkImage image;
@@ -181,6 +179,11 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
             (uintptr_t)(mapper->src->planes[i] - mapper->src->planes[0]));
 
         struct ra_tex_dk *tex_priv = mapper->tex[i]->priv = talloc_zero(mapper->tex[i], struct ra_tex_dk);
+        if (!tex_priv) {
+            dkMemBlockDestroy(cache.memblock);
+            return -1;
+        }
+
         tex_priv->image    = image;
         tex_priv->memblock = cache.memblock;
 

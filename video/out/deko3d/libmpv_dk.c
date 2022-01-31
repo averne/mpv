@@ -96,8 +96,10 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
 
     dkCmdBufClear(priv->dk->cmdbuf);
 
-    for (int i = 0; i < priv->dk->num_tmp_memblocks; ++i)
-        dkMemBlockDestroy(priv->dk->tmp_memblocks[i]);
+    for (int i = 0; i < priv->dk->num_tmp_memblocks; ++i) {
+        if (priv->dk->tmp_memblocks[i])
+            dkMemBlockDestroy(priv->dk->tmp_memblocks[i]);
+    }
     priv->dk->num_tmp_memblocks = 0;
 }
 
