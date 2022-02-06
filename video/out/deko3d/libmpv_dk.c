@@ -90,17 +90,23 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
     MP_VERBOSE(ctx, "%s\n", __func__);
 
     // Wait for the rendering to complete before clearing the state
-    // TODO: is there a better way than to use dkQueueWaitIdle? (semaphore with DkVariable?)
-    // But since frame rendering is sequential it shouldn't matter
-    dkQueueWaitIdle(priv->dk->queue);
+    dkQueueFlush(priv->dk->queue);
+    dkFenceWait(&((struct ra_tex_dk *)priv->cur_fbo->priv)->fence, 10e6);
 
-    dkCmdBufClear(priv->dk->cmdbuf);
+    if (priv->dk->can_clear_cmdbuf)
+        dkCmdBufClear(priv->dk->cmdbuf);
 
-    for (int i = 0; i < priv->dk->num_tmp_memblocks; ++i) {
-        if (priv->dk->tmp_memblocks[i])
-            dkMemBlockDestroy(priv->dk->tmp_memblocks[i]);
+    // Fences have to stay in place in memory in order to get signalled correctly
+    // Thus we work our way *down* the list and break once a command hasn't been completed
+    // Note that polling (internal) fences is cheap and doesn't involve IPC
+    for (int i = priv->dk->num_tmp_memblocks - 1; i > -1; --i) {
+        if (dkFenceWait(&priv->dk->tmp_memblocks[i].fence, 0) == DkResult_Success) {
+            dkMemBlockDestroy(priv->dk->tmp_memblocks[i].blk);
+            priv->dk->num_tmp_memblocks--;
+        } else {
+            break;
+        }
     }
-    priv->dk->num_tmp_memblocks = 0;
 }
 
 static void destroy(struct libmpv_gpu_context *ctx) {

@@ -48,7 +48,6 @@ struct ra_buf_dk {
 struct ra_rpass_dk {
     DkMemBlock shader_memblock;
     DkShader *shaders;
-    int num_shaders;
 
     DkMemBlock vao_memblock;
     DkVtxAttribState *vao_attribs;

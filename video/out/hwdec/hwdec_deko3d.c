@@ -122,6 +122,9 @@ static int mapper_init(struct ra_hwdec_mapper *mapper) {
         dkImageLayoutInitialize(&priv->dklayouts[i], &layout_maker);
 
         mapper->tex[i] = talloc_zero(mapper, struct ra_tex);
+        if (!mapper->tex[i])
+            return -1;
+
         mapper->tex[i]->params = (struct ra_tex_params) {
             .dimensions = 2,
             .w          = mp_image_plane_w(&layout, i),
@@ -149,7 +152,7 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
 
 static int mapper_map(struct ra_hwdec_mapper *mapper) {
     struct priv *priv = mapper->priv;
-    AVTX1Map *map = (AVTX1Map *)mapper->src->planes[3];
+    AVTX1Map     *map = (AVTX1Map *)mapper->src->planes[3];
 
     MP_VERBOSE(mapper, "%s, map handle %#x\n", __func__, ff_tx1_map_get_handle(map));
 

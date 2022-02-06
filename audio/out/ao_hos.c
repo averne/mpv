@@ -126,6 +126,9 @@ static void uninit(struct ao *ao) {
 
     MP_VERBOSE(ao, "Deinitializing hos audio\n");
 
+    audrvVoiceStop(&priv->driver, 0);
+    audrvUpdate(&priv->driver);
+
     audrvClose(&priv->driver);
     audrenExit();
     free(priv->buffers);
