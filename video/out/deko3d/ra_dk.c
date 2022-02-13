@@ -276,7 +276,7 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
     sampler.compareEnable = false;
     sampler.compareOp = DkCompareOp_Never;
     sampler.wrapMode[0] = sampler.wrapMode[1] = sampler.wrapMode[2] =
-        tex->params.src_repeat ? DkWrapMode_Repeat  : DkWrapMode_Clamp;
+        tex->params.src_repeat ? DkWrapMode_Repeat  : DkWrapMode_ClampToEdge;
     sampler.minFilter = sampler.magFilter =
         tex->params.src_linear ? DkFilter_Linear    : DkFilter_Nearest;
     sampler.mipFilter =
@@ -402,12 +402,12 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
         struct ra_buf_dk *buf_priv = params->buf->priv;
         tex_copy = (DkCopyBuf){
             dkMemBlockGetGpuAddr(buf_priv->memblock) + params->buf_offset,
-            params->stride, mp_rect_h(*params->rc) * params->tex->params.d,
+            params->stride, tex_rect.height * tex_rect.depth,
         };
     } else {
         // Map the provided buffer into the GPU address space and mark it to be removed from it later
         size_t memblk_off  = (uintptr_t)params->src & (DK_MEMBLOCK_ALIGNMENT - 1);
-        size_t memblk_size = params->stride * mp_rect_h(*params->rc) * params->tex->params.d;
+        size_t memblk_size = params->stride * tex_rect.height * tex_rect.depth + memblk_off;
 
         DkMemBlockMaker memblock_maker;
         dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(memblk_size, DK_MEMBLOCK_ALIGNMENT));
@@ -419,22 +419,27 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
             return false;
 
         MP_TARRAY_APPEND(ra, priv->dk->tmp_memblocks, priv->dk->num_tmp_memblocks,
-            (struct ra_dk_tmp_memblock){memblock, 0});
+            (struct ra_dk_tmp_memblock){memblock});
 
         tex_copy = (DkCopyBuf){
             dkMemBlockGetGpuAddr(memblock) + memblk_off,
-            params->stride, mp_rect_h(*params->rc) * params->tex->params.d,
+            params->stride, tex_rect.height * tex_rect.depth,
         };
     }
 
     dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
     dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
-    if (!params->buf)
-        dkCmdBufSignalFence(priv->dk->cmdbuf,
-            &priv->dk->tmp_memblocks[priv->dk->num_tmp_memblocks - 1].fence, false);
+    if (params->buf) {
+        struct ra_buf_dk *buf_priv = params->buf->priv;
+        dkCmdBufSignalFence(priv->dk->cmdbuf, &buf_priv->fence, false);
+    } else {
+        struct ra_dk_tmp_memblock *tmp =
+            &priv->dk->tmp_memblocks[priv->dk->num_tmp_memblocks - 1];
+        dkCmdBufSignalFence(priv->dk->cmdbuf, &tmp->fence, false);
+    }
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    // dkQueueFlush(priv->dk->queue);
+    dkQueueFlush(priv->dk->queue);
 
     return true;
 }
@@ -553,6 +558,7 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
 
     DkMemBlockMaker memblock_maker;
     dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(params->size, DK_MEMBLOCK_ALIGNMENT));
+    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
 
     buf_priv->memblock = dkMemBlockCreate(&memblock_maker);
     if (!buf_priv->memblock) {
@@ -565,6 +571,8 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
 
     if (params->initial_data)
         memcpy(dkMemBlockGetCpuAddr(buf_priv->memblock), params->initial_data, params->size);
+
+    dkQueueSignalFence(priv->dk->queue, &buf_priv->fence, false);
 
     return buf;
 }
@@ -579,6 +587,14 @@ static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
 
     // Not needed since buffers are currently all cpu-uncached
     // dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
+}
+
+static bool dk_buf_poll(struct ra *ra, struct ra_buf *buf) {
+    struct ra_buf_dk *buf_priv = buf->priv;
+
+    MP_VERBOSE(ra, "%s\n", __func__);
+
+    return dkFenceWait(&buf_priv->fence, 0) == DkResult_Success;
 }
 
 static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct mp_rect *scissor) {
@@ -931,6 +947,10 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
             struct ra_tex         *inp_tex = *(struct ra_tex **)val->data;
             struct ra_tex_dk *inp_tex_priv = inp_tex->priv;
             dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_tex_priv->fence, false);
+        } else if (inp->type == RA_VARTYPE_BUF_RW) {
+            struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
+            struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
+            dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, false);
         }
     }
 
@@ -969,12 +989,15 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
             case RA_VARTYPE_BUF_RW:
                 struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
                 struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
-                if (inp->type == RA_VARTYPE_BUF_RO)
+                dkCmdBufWaitFence(priv->dk->cmdbuf, &inp_buf_priv->fence);
+                if (inp->type == RA_VARTYPE_BUF_RO) {
+                    dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, false);
                     dkCmdBufBindUniformBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
-                else
+                } else {
                     dkCmdBufBindStorageBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
+                }
                 break;
             default:
                 break;
@@ -1000,8 +1023,7 @@ static struct ra_fns ra_fns_dk = {
     .buf_create         = dk_buf_create,
     .buf_destroy        = dk_buf_destroy,
     .buf_update         = dk_buf_update,
-    // Probably not useful to implement (would need to fence buffer usage)
-    // .buf_poll          = dk_buf_poll,
+    .buf_poll           = dk_buf_poll,
     .clear              = dk_clear,
     .blit               = dk_blit,
     .uniform_layout     = std140_layout,

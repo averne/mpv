@@ -43,6 +43,7 @@ struct ra_tex_dk {
 
 struct ra_buf_dk {
     DkMemBlock memblock;
+    DkFence fence;
 };
 
 struct ra_rpass_dk {

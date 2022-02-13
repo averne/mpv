@@ -21,6 +21,10 @@
 #include <math.h>
 #include <limits.h>
 
+#ifdef __SWITCH__
+#   include <switch.h>
+#endif
+
 #include <libavutil/common.h>
 #include <ass/ass.h>
 
@@ -195,6 +199,13 @@ static void enable_output(struct sd *sd, bool enable)
         ctx->ass_renderer = NULL;
     } else {
         ctx->ass_renderer = ass_renderer_init(ctx->ass_library);
+
+        PlFontData font;
+        Result rc = plGetSharedFontByType(&font, PlSharedFontType_Standard);
+
+        if (R_SUCCEEDED(rc))
+            ass_add_font(ctx->ass_library, "nintendo-standard",
+                font.address, font.size);
 
         mp_ass_configure_fonts(ctx->ass_renderer, sd->opts->sub_style,
                                sd->global, sd->log);
