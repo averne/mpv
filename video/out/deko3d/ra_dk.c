@@ -633,24 +633,34 @@ static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
     dkImageViewDefaults(&dst_view, &tex_dst_priv->image);
 
     DkImageRect src_rect = (DkImageRect){
-        0, 0, 0,
-        src->params.w,
-        src->params.h,
-        src->params.d,
+        src_rc->x0, src_rc->y0, 0,
+        mp_rect_w(*src_rc),
+        mp_rect_h(*src_rc),
+        1
     };
 
     DkImageRect dst_rect = (DkImageRect){
-        0, 0, 0,
-        dst->params.w,
-        dst->params.h,
-        dst->params.d,
+        dst_rc->x0, dst_rc->y0, 0,
+        mp_rect_w(*dst_rc),
+        mp_rect_h(*dst_rc),
+        1
     };
+
+
+    uint32_t flags = DkBlitFlag_ModeBlit;
+
+    // Handle y-flipping here, since deko3d doesn't flip blits based on coordinates
+    if (dst_rc->y0 > dst_rc->y1) {
+        flags |= DkBlitFlag_FlipY;
+        dst_rect.y = dst_rc->y1;
+        dst_rect.height = dst_rc->y0 - dst_rc->y1;
+    }
 
     dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_src_priv->fence);
     dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_dst_priv->fence);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_src_priv->fence, false);
     dkCmdBufBlitImage(priv->dk->cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect,
-        DkBlitFlag_ModeBlit, 0);
+        flags, 0);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_dst_priv->fence, false);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
