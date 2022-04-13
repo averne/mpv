@@ -17,6 +17,7 @@
  * with mpv.  If not, see <http://www.gnu.org/licenses/>.
  */
 
+#include <libavutil/intreadwrite.h>
 #include <switch.h>
 #include <libuam/libuam.h>
 
@@ -61,7 +62,61 @@ struct priv {
     size_t num_descriptors;
 };
 
-static struct ra_fns ra_fns_dk;
+static const char dk_shadercache_magic[] = "DKCH";
+static const int dk_shadercache_version = 1;
+
+struct dk_shadercache_hdr {
+    uint32_t magic;
+    int cache_version;
+    uint32_t vertex_offset, vertex_size;
+    uint32_t fragment_offset, fragment_size;
+    uint32_t compute_offset, compute_size;
+};
+
+static void dk_destroy(struct ra *ra);
+static void dk_tex_destroy(struct ra *ra, struct ra_tex *tex);
+static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *params);
+static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *params);
+static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params);
+static void dk_buf_destroy(struct ra *ra, struct ra_buf *buf);
+static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *params);
+static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
+                          const void *data, size_t size);
+static bool dk_buf_poll(struct ra *ra, struct ra_buf *buf);
+static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct mp_rect *scissor);
+static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
+                    struct mp_rect *dst_rc, struct mp_rect *src_rc);
+static int dk_desc_namespace(struct ra *ra, enum ra_vartype type);
+static void dk_renderpass_destroy(struct ra *ra, struct ra_renderpass *pass);
+static struct ra_renderpass *dk_renderpass_create(struct ra *ra,
+                                                  const struct ra_renderpass_params *params);
+static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_params *params);
+static void dk_debug_marker(struct ra *ra, const char *msg);
+
+static struct ra_fns ra_fns_dk = {
+    .destroy            = dk_destroy,
+    .tex_create         = dk_tex_create,
+    .tex_destroy        = dk_tex_destroy,
+    .tex_upload         = dk_tex_upload,
+    .tex_download       = dk_tex_download,
+    .buf_create         = dk_buf_create,
+    .buf_destroy        = dk_buf_destroy,
+    .buf_update         = dk_buf_update,
+    .buf_poll           = dk_buf_poll,
+    .clear              = dk_clear,
+    .blit               = dk_blit,
+    .uniform_layout     = std140_layout,
+    .desc_namespace     = dk_desc_namespace,
+    .renderpass_create  = dk_renderpass_create,
+    .renderpass_destroy = dk_renderpass_destroy,
+    .renderpass_run     = dk_renderpass_run,
+    // deko3d does not provide timestamp information
+    // .timer_create       = dk_timer_create,
+    // .timer_destroy      = dk_timer_destroy,
+    // .timer_start        = dk_timer_start,
+    // .timer_stop         = dk_timer_stop,
+    .debug_marker       = dk_debug_marker,
+};
 
 static inline DkBlendFactor map_blend_factor(enum ra_blend factor) {
     switch (factor) {
@@ -684,10 +739,89 @@ static void dk_renderpass_destroy(struct ra *ra, struct ra_renderpass *pass) {
     talloc_free(pass);
 }
 
+static void save_shader_code(struct ra *ra, struct ra_renderpass *pass,
+                             bstr vert_dat, bstr frag_dat, bstr comp_dat) {
+    struct dk_shadercache_hdr header = {
+        .magic         = AV_RN32(dk_shadercache_magic),
+        .cache_version = dk_shadercache_version,
+    };
+
+    uint32_t offset = sizeof(struct dk_shadercache_hdr);
+    if (vert_dat.len)
+        header.vertex_offset   = offset,                 header.vertex_size   = vert_dat.len;
+    if (frag_dat.len)
+        header.fragment_offset = offset += vert_dat.len, header.fragment_size = frag_dat.len;
+    if (comp_dat.len)
+        header.compute_offset  = offset += frag_dat.len, header.compute_size  = comp_dat.len;
+
+    struct bstr *prog = &pass->params.cached_program;
+    bstr_xappend(pass, prog, (bstr){(char *)&header, sizeof(struct dk_shadercache_hdr)});
+    bstr_xappend(pass, prog, vert_dat);
+    bstr_xappend(pass, prog, frag_dat);
+    bstr_xappend(pass, prog, comp_dat);
+}
+
+static bool load_shader_code(struct ra *ra, struct ra_renderpass *pass, bstr data,
+                             DkShader *vert_sh, DkShader *frag_sh, DkShader *comp_sh) {
+    struct priv              *priv = ra->priv;
+    struct ra_rpass_dk  *pass_priv = pass->priv;
+    struct dk_shadercache_hdr *hdr = (struct dk_shadercache_hdr *)data.start;
+
+    MP_VERBOSE(ra, "Loading from shadercache\n");
+
+    if (!data.start ||
+            (data.len < sizeof(struct dk_shadercache_hdr)))
+        return false;
+
+    if ((hdr->magic != AV_RN32(dk_shadercache_magic)) ||
+            (hdr->cache_version != dk_shadercache_version))
+        return false;
+
+    size_t memblock_size = DK_SHADER_CODE_UNUSABLE_SIZE +
+        ((vert_sh && hdr->vertex_size)   ? MP_ALIGN_UP(hdr->vertex_size,   DK_SHADER_CODE_ALIGNMENT) : 0) +
+        ((frag_sh && hdr->fragment_size) ? MP_ALIGN_UP(hdr->fragment_size, DK_SHADER_CODE_ALIGNMENT) : 0) +
+        ((comp_sh && hdr->compute_size)  ? MP_ALIGN_UP(hdr->compute_size,  DK_SHADER_CODE_ALIGNMENT) : 0);
+
+    DkMemBlockMaker memblock_maker;
+    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
+        MP_ALIGN_UP(memblock_size, DK_MEMBLOCK_ALIGNMENT));
+    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+    pass_priv->shader_memblock = dkMemBlockCreate(&memblock_maker);
+    if (!pass_priv->shader_memblock)
+        return false;
+
+    size_t offset = 0;
+    DkShaderMaker shader_maker;
+    if (vert_sh && hdr->vertex_size) {
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + offset,
+            data.start + hdr->vertex_offset, hdr->vertex_size);
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, offset);
+        dkShaderInitialize(vert_sh, &shader_maker);
+        offset += MP_ALIGN_UP(hdr->vertex_size, DK_SHADER_CODE_ALIGNMENT);
+    }
+    if (frag_sh && hdr->fragment_size) {
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + offset,
+            data.start + hdr->fragment_offset, hdr->fragment_size);
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, offset);
+        dkShaderInitialize(frag_sh, &shader_maker);
+        offset += MP_ALIGN_UP(hdr->fragment_size, DK_SHADER_CODE_ALIGNMENT);
+    }
+    if (comp_sh && hdr->compute_size) {
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + offset,
+            data.start + hdr->compute_offset, hdr->compute_size);
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, offset);
+        dkShaderInitialize(comp_sh, &shader_maker);
+        offset += MP_ALIGN_UP(hdr->compute_size, DK_SHADER_CODE_ALIGNMENT);
+    }
+
+    return true;
+}
+
 static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct ra_renderpass *pass,
                                                          const struct ra_renderpass_params *params) {
     struct priv             *priv = ra->priv;
     struct ra_rpass_dk *pass_priv = pass->priv;
+    DkMemBlockMaker memblock_maker;
 
     if (mp_msg_test(ra->log, MSGL_V)) {
         MP_VERBOSE(ra, "Vertex shader source:\n");
@@ -696,56 +830,74 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
         mp_log_source(ra->log, MSGL_V, params->frag_shader);
     }
 
-    DkMemBlockMaker memblock_maker;
-
-    uam_compiler *vsh_compiler = uam_create_compiler(DkStage_Vertex),
-        *fsh_compiler = uam_create_compiler(DkStage_Fragment);
-    if (!vsh_compiler || !fsh_compiler) {
-        TA_FREEP(&pass);
-        goto done;
-    }
-
-    if (!uam_compile_dksh(vsh_compiler, params->vertex_shader) ||
-            !uam_compile_dksh(fsh_compiler, params->frag_shader)) {
-        MP_ERR(ra, "Failed to compile shaders\n");
-        TA_FREEP(&pass);
-        goto done;
-    }
-
-    size_t vsh_size = uam_get_code_size(vsh_compiler), fsh_size = uam_get_code_size(fsh_compiler);
-    size_t vsh_off = 0, fsh_off = MP_ALIGN_UP(vsh_size, DK_SHADER_CODE_ALIGNMENT);
-
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
-        MP_ALIGN_UP(vsh_size + fsh_size + DK_SHADER_CODE_UNUSABLE_SIZE, DK_MEMBLOCK_ALIGNMENT));
-    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
-    pass_priv->shader_memblock = dkMemBlockCreate(&memblock_maker);
-    if (!pass_priv->shader_memblock) {
-        dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
-    }
-
-    uam_write_code(vsh_compiler, (uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + vsh_off);
-    uam_write_code(fsh_compiler, (uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + fsh_off);
-
     pass_priv->shaders = talloc_array(pass, DkShader, 2);
     if (!pass_priv->shaders) {
         dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
+        ta_free(pass);
+        return NULL;
     }
 
-    DkShaderMaker shader_maker;
-    dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, vsh_off);
-    dkShaderInitialize(&pass_priv->shaders[0], &shader_maker);
-    dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, fsh_off);
-    dkShaderInitialize(&pass_priv->shaders[1], &shader_maker);
+    if (!params->cached_program.len ||
+            !load_shader_code(ra, pass, params->cached_program, &pass_priv->shaders[0], &pass_priv->shaders[1], NULL)) {
+        uam_compiler *vsh_compiler = uam_create_compiler(DkStage_Vertex),
+            *fsh_compiler = uam_create_compiler(DkStage_Fragment);
+        if (!vsh_compiler || !fsh_compiler) {
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
 
+        if (!uam_compile_dksh(vsh_compiler, params->vertex_shader) ||
+                !uam_compile_dksh(fsh_compiler, params->frag_shader)) {
+            MP_ERR(ra, "Failed to compile shaders\n");
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
+
+        size_t vsh_size = uam_get_code_size(vsh_compiler), fsh_size = uam_get_code_size(fsh_compiler);
+        size_t vsh_off = 0, fsh_off = MP_ALIGN_UP(vsh_size, DK_SHADER_CODE_ALIGNMENT);
+
+        dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
+            MP_ALIGN_UP(vsh_size + fsh_size + DK_SHADER_CODE_UNUSABLE_SIZE, DK_MEMBLOCK_ALIGNMENT));
+        memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+        pass_priv->shader_memblock = dkMemBlockCreate(&memblock_maker);
+        if (!pass_priv->shader_memblock) {
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
+
+        uam_write_code(vsh_compiler, (uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + vsh_off);
+        uam_write_code(fsh_compiler, (uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + fsh_off);
+
+        save_shader_code(ra, pass,
+            (bstr){(uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + vsh_off, vsh_size},
+            (bstr){(uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + fsh_off, fsh_size},
+            (bstr){0});
+
+        DkShaderMaker shader_maker;
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, vsh_off);
+        dkShaderInitialize(&pass_priv->shaders[0], &shader_maker);
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, fsh_off);
+        dkShaderInitialize(&pass_priv->shaders[1], &shader_maker);
+
+        goto success;
+
+fail:
+        if (vsh_compiler)
+            uam_free_compiler(vsh_compiler);
+        if (fsh_compiler)
+            uam_free_compiler(fsh_compiler);
+        return NULL;
+    }
+
+success:
     pass_priv->vao_attribs = talloc_array(pass, DkVtxAttribState, params->num_vertex_attribs);
     if (!pass_priv->vao_attribs) {
         dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
+        ta_free(pass);
+        return NULL;
     }
 
     for (int i = 0; i < params->num_vertex_attribs; ++i) {
@@ -767,8 +919,8 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
     pass_priv->vao_memblock = dkMemBlockCreate(&memblock_maker);
     if (!pass_priv->vao_memblock) {
         dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
+        ta_free(pass);
+        return NULL;
     }
 
     dkRasterizerStateDefaults(&pass_priv->rasterizer_state);
@@ -785,11 +937,6 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
             map_blend_factor(params->blend_src_alpha), map_blend_factor(params->blend_dst_alpha));
     }
 
-done:
-    if (vsh_compiler)
-        uam_free_compiler(vsh_compiler);
-    if (fsh_compiler)
-        uam_free_compiler(fsh_compiler);
     return pass;
 }
 
@@ -797,52 +944,64 @@ static struct ra_renderpass *dk_renderpass_create_compute(struct ra *ra, struct 
                                                          const struct ra_renderpass_params *params) {
     struct priv             *priv = ra->priv;
     struct ra_rpass_dk *pass_priv = pass->priv;
+    DkMemBlockMaker memblock_maker;
 
     if (mp_msg_test(ra->log, MSGL_V)) {
         MP_VERBOSE(ra, "Compute shader source:\n");
         mp_log_source(ra->log, MSGL_V, params->compute_shader);
     }
 
-    DkMemBlockMaker memblock_maker;
-
-    uam_compiler *sh_compiler = uam_create_compiler(DkStage_Compute);
-    if (!sh_compiler) {
-        TA_FREEP(&pass);
-        goto done;
-    }
-
-    if (!uam_compile_dksh(sh_compiler, params->compute_shader)) {
-        MP_ERR(ra, "Failed to compile shader\n");
-        TA_FREEP(&pass);
-        goto done;
-    }
-
-    size_t sh_size = uam_get_code_size(sh_compiler);
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
-        MP_ALIGN_UP(sh_size + DK_SHADER_CODE_UNUSABLE_SIZE, DK_MEMBLOCK_ALIGNMENT));
-    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
-    pass_priv->shader_memblock = dkMemBlockCreate(&memblock_maker);
-    if (!pass_priv->shader_memblock) {
-        dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
-    }
-
-    uam_write_code(sh_compiler, dkMemBlockGetCpuAddr(pass_priv->shader_memblock));
-
     pass_priv->shaders = talloc_array(pass, DkShader, 1);
     if (!pass_priv->shaders) {
         dk_renderpass_destroy(ra, pass);
-        pass = NULL;
-        goto done;
+        ta_free(pass);
+        return NULL;
     }
 
-    DkShaderMaker shader_maker;
-    dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, 0);
-    dkShaderInitialize(&pass_priv->shaders[0], &shader_maker);
+    if (!params->cached_program.len ||
+            !load_shader_code(ra, pass, params->cached_program, NULL, NULL, &pass_priv->shaders[0])) {
+        uam_compiler *sh_compiler = uam_create_compiler(DkStage_Compute);
+        if (!sh_compiler) {
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
 
-done:
-    uam_free_compiler(sh_compiler);
+        if (!uam_compile_dksh(sh_compiler, params->compute_shader)) {
+            MP_ERR(ra, "Failed to compile shader\n");
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
+
+        size_t sh_size = uam_get_code_size(sh_compiler);
+        dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
+            MP_ALIGN_UP(sh_size + DK_SHADER_CODE_UNUSABLE_SIZE, DK_MEMBLOCK_ALIGNMENT));
+        memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached | DkMemBlockFlags_Code;
+        pass_priv->shader_memblock = dkMemBlockCreate(&memblock_maker);
+        if (!pass_priv->shader_memblock) {
+            dk_renderpass_destroy(ra, pass);
+            ta_free(pass);
+            goto fail;
+        }
+
+        uam_write_code(sh_compiler, dkMemBlockGetCpuAddr(pass_priv->shader_memblock));
+        save_shader_code(ra, pass, (bstr){0}, (bstr){0},
+            (bstr){dkMemBlockGetCpuAddr(pass_priv->shader_memblock), sh_size});
+
+        DkShaderMaker shader_maker;
+        dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, 0);
+        dkShaderInitialize(&pass_priv->shaders[0], &shader_maker);
+
+        goto success;
+
+fail:
+        if (sh_compiler)
+            uam_free_compiler(sh_compiler);
+        return NULL;
+    }
+
+success:
     return pass;
 }
 
@@ -1023,28 +1182,3 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
 static void dk_debug_marker(struct ra *ra, const char *msg) {
     MP_VERBOSE(ra, "%s: %s\n", __func__, msg);
 }
-
-static struct ra_fns ra_fns_dk = {
-    .destroy            = dk_destroy,
-    .tex_create         = dk_tex_create,
-    .tex_destroy        = dk_tex_destroy,
-    .tex_upload         = dk_tex_upload,
-    .tex_download       = dk_tex_download,
-    .buf_create         = dk_buf_create,
-    .buf_destroy        = dk_buf_destroy,
-    .buf_update         = dk_buf_update,
-    .buf_poll           = dk_buf_poll,
-    .clear              = dk_clear,
-    .blit               = dk_blit,
-    .uniform_layout     = std140_layout,
-    .desc_namespace     = dk_desc_namespace,
-    .renderpass_create  = dk_renderpass_create,
-    .renderpass_destroy = dk_renderpass_destroy,
-    .renderpass_run     = dk_renderpass_run,
-    // deko3d does not provide timestamp information
-    // .timer_create       = dk_timer_create,
-    // .timer_destroy      = dk_timer_destroy,
-    // .timer_start        = dk_timer_start,
-    // .timer_stop         = dk_timer_stop,
-    .debug_marker       = dk_debug_marker,
-};
