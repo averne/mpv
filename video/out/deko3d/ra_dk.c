@@ -423,6 +423,34 @@ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *p
 
     dkImageInitialize(&tex_priv->image, &tex_layout, tex_priv->memblock, 0);
 
+    if (params->initial_data) {
+        struct ra_buf *buf = dk_buf_create(ra, &(struct ra_buf_params){
+            .size         = params->w * params->h * params->format->pixel_size,
+            .initial_data = params->initial_data,
+        });
+        if (!buf) {
+            dk_buf_destroy(ra, buf);
+            dk_tex_destroy(ra, tex);
+            return NULL;
+        }
+
+        bool ret = dk_tex_upload(ra, &(struct ra_tex_upload_params){
+            .tex    = tex,
+            .buf    = buf,
+            .stride = params->w * params->format->pixel_size,
+        });
+        if (!ret) {
+            dk_buf_destroy(ra, buf);
+            dk_tex_destroy(ra, tex);
+            return NULL;
+        }
+
+        struct ra_buf_dk *buf_priv = buf->priv;
+        dkFenceWait(&buf_priv->fence, -1);
+
+        dk_buf_destroy(ra, buf);
+    }
+
     ra_dk_register_texture(ra, tex);
 
     return tex;
@@ -483,6 +511,10 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
     }
 
     dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
+    if (params->buf) {
+        struct ra_buf_dk *buf_priv = params->buf->priv;
+        dkCmdBufWaitFence(priv->dk->cmdbuf, &buf_priv->fence);
+    }
     dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
     if (params->buf) {
@@ -1177,6 +1209,9 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
         dk_renderpass_run_raster(ra, params);
     else
         dk_renderpass_run_compute(ra, params);
+
+    // TODO: Fix sync across the whole backend
+    dkQueueWaitIdle(priv->dk->queue);
 }
 
 static void dk_debug_marker(struct ra *ra, const char *msg) {
