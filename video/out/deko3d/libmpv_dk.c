@@ -12,6 +12,7 @@ struct priv {
     struct ra_ctx *ra_ctx;
 
     mp_dk_ctx *dk;
+    DkFence *client_fence;
 
     struct ra_tex *cur_fbo;
 };
@@ -68,18 +69,23 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
     if (!fmt)
         return MPV_ERROR_INVALID_PARAMETER;
 
-    priv->cur_fbo->params.w          = fbo->w;
-    priv->cur_fbo->params.h          = fbo->h;
-    priv->cur_fbo->params.d          = 1;
-    priv->cur_fbo->params.format     = fmt;
-    priv->cur_fbo->params.render_dst = true;
-    priv->cur_fbo->params.blit_src   = true;
-    priv->cur_fbo->params.blit_dst   = true;
+    priv->cur_fbo->params = (struct ra_tex_params){
+        .w          = fbo->w,
+        .h          = fbo->h,
+        .d          = 1,
+        .format     = fmt,
+        .render_dst = true,
+        .blit_src   = true,
+        .blit_dst   = true,
+    };
 
     struct ra_tex_dk *priv_tex = priv->cur_fbo->priv;
     priv_tex->image = *fbo->tex;
 
     *out = priv->cur_fbo;
+
+    priv->client_fence = fbo->fence;
+    dkQueueWaitFence(priv->dk->queue, priv->client_fence);
 
     return 0;
 }
@@ -89,11 +95,12 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
 
     MP_VERBOSE(ctx, "%s\n", __func__);
 
-    // Wait for the rendering to complete before clearing the state
+    // Wait for all the rendering tasks to complete
+    // It would be better to forward a fence to the presentation queue, but the deko3d API doesn't support that
+    dkQueueSignalFence(priv->dk->queue, priv->client_fence, false);
     dkQueueFlush(priv->dk->queue);
-    dkFenceWait(&((struct ra_tex_dk *)priv->cur_fbo->priv)->fence, 10e6);
 
-    if (priv->dk->can_clear_cmdbuf)
+    if (atomic_load_explicit(&priv->dk->can_clear_cmdbuf, memory_order_relaxed))
         dkCmdBufClear(priv->dk->cmdbuf);
 
     // Fences have to stay in place in memory in order to get signalled correctly

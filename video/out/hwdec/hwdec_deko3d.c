@@ -160,6 +160,11 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
         if (priv->cached_textures[i].handle == ff_tx1_map_get_handle(map)) {
             mapper->tex[0]->priv = priv->cached_textures[i].tex[0];
             mapper->tex[1]->priv = priv->cached_textures[i].tex[1];
+
+            // Invalidate texture cache
+            dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Image);
+            dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+
             return 0;
         }
     }

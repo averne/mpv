@@ -36,14 +36,13 @@ struct dk_format {
 struct ra_tex_dk {
     DkMemBlock memblock;
     DkImage image;
-    DkFence fence;
-
     int descriptor_idx;
 };
 
 struct ra_buf_dk {
     DkMemBlock memblock;
     DkFence fence;
+    bool dirty;
 };
 
 struct ra_rpass_dk {

@@ -21,12 +21,14 @@
 
 #include <deko3d.h>
 
+#include "osdep/atomic.h"
+
 typedef struct {
     DkDevice device;
     DkQueue queue;
     DkMemBlock cmdbuf_memblock;
     DkCmdBuf cmdbuf;
-    bool can_clear_cmdbuf;
+    atomic_bool can_clear_cmdbuf;
 
     // Temporary memblocks used for mapping buffers in the GPU address space
     // Freed at some point when the frame is completed

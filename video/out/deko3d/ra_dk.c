@@ -201,6 +201,9 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
                RA_CAP_NESTED_ARRAY  |
                RA_CAP_GATHER        |
                RA_CAP_FRAGCOORD     |
+               // Causes most postproc shaders to use compute instead of fragment
+               // Works fine here but doesn't seem to cause a significant perf gain
+               // RA_CAP_PARALLEL_COMPUTE |
                RA_CAP_NUM_GROUPS;
 
     // Values reported by the opengl driver
@@ -266,7 +269,7 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     if (!priv->dk->queue)
         return -1;
 
-    priv->dk->can_clear_cmdbuf = true;
+    priv->dk->can_clear_cmdbuf = (atomic_bool)ATOMIC_VAR_INIT(true);
 
     return 0;
 }
@@ -338,8 +341,6 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
         tex->params.src_linear ? DkMipFilter_Linear : DkMipFilter_Nearest;
 
     dkSamplerDescriptorInitialize(&sampler_descs[tex_priv->descriptor_idx], &sampler);
-
-    dkQueueSignalFence(priv->dk->queue, &tex_priv->fence, false);
 
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Descriptors);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
@@ -510,21 +511,10 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
         };
     }
 
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
-    if (params->buf) {
-        struct ra_buf_dk *buf_priv = params->buf->priv;
-        dkCmdBufWaitFence(priv->dk->cmdbuf, &buf_priv->fence);
-    }
     dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
-    if (params->buf) {
-        struct ra_buf_dk *buf_priv = params->buf->priv;
-        dkCmdBufSignalFence(priv->dk->cmdbuf, &buf_priv->fence, false);
-    } else {
-        struct ra_dk_tmp_memblock *tmp =
-            &priv->dk->tmp_memblocks[priv->dk->num_tmp_memblocks - 1];
-        dkCmdBufSignalFence(priv->dk->cmdbuf, &tmp->fence, false);
-    }
+    if (params->buf)
+        dkCmdBufSignalFence(priv->dk->cmdbuf, &((struct ra_buf_dk *)params->buf->priv)->fence, false);
+
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
 
@@ -586,10 +576,8 @@ static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params
 
     DkFence fence;
 
-    priv->dk->can_clear_cmdbuf = false;
+    atomic_store(&priv->dk->can_clear_cmdbuf, false);
 
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
     dkCmdBufBlitImage(priv->dk->cmdbuf, &tex_view, &tex_rect, &dst_view, &tex_rect,
         DkBlitFlag_ModeBlit, 0);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &fence, true); // Flush GPU cache
@@ -605,7 +593,7 @@ static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params
         goto done;
     }
 
-    priv->dk->can_clear_cmdbuf = true;
+    atomic_store(&priv->dk->can_clear_cmdbuf, true);
     ret = true;
 
 done:
@@ -643,6 +631,9 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
         return NULL;
     }
 
+    buf_priv->dirty = false;
+    buf_priv->fence = (DkFence){0};
+
     DkMemBlockMaker memblock_maker;
     dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(params->size, DK_MEMBLOCK_ALIGNMENT));
     memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
@@ -659,8 +650,6 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
     if (params->initial_data)
         memcpy(dkMemBlockGetCpuAddr(buf_priv->memblock), params->initial_data, params->size);
 
-    dkQueueSignalFence(priv->dk->queue, &buf_priv->fence, false);
-
     return buf;
 }
 
@@ -671,6 +660,8 @@ static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
     MP_VERBOSE(ra, "%s\n", __func__);
 
     memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
+
+    buf_priv->dirty = true;
 
     // Not needed since buffers are currently all cpu-uncached
     // dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
@@ -698,11 +689,9 @@ static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct m
         mp_rect_w(*scissor), mp_rect_h(*scissor),
     };
 
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
     dkCmdBufBindRenderTarget(priv->dk->cmdbuf, &tex_view, NULL);
     dkCmdBufSetScissors(priv->dk->cmdbuf, 0, &dkscissor, 1);
     dkCmdBufClearColorFloat(priv->dk->cmdbuf, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     // dkQueueFlush(priv->dk->queue);
 }
@@ -733,7 +722,6 @@ static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
         1
     };
 
-
     uint32_t flags = DkBlitFlag_ModeBlit;
 
     // Handle y-flipping here, since deko3d doesn't flip blits based on coordinates
@@ -743,12 +731,8 @@ static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
         dst_rect.height = dst_rc->y0 - dst_rc->y1;
     }
 
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_src_priv->fence);
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_dst_priv->fence);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_src_priv->fence, false);
     dkCmdBufBlitImage(priv->dk->cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect,
         flags, 0);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_dst_priv->fence, false);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
 }
@@ -1098,11 +1082,8 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
         mp_rect_w(params->scissors), mp_rect_h(params->scissors),
     };
 
-    dkCmdBufWaitFence(priv->dk->cmdbuf, &tex_priv->fence);
-
     if (params->pass->params.enable_blend)
         dkCmdBufBindBlendState(priv->dk->cmdbuf, 0, &pass_priv->blend_state);
-
     dkCmdBufBindRenderTarget(priv->dk->cmdbuf, &tex_view, NULL);
     dkCmdBufSetViewports(priv->dk->cmdbuf, 0, &dkviewport, 1);
     dkCmdBufSetScissors(priv->dk->cmdbuf, 0, &dkscissor, 1);
@@ -1120,8 +1101,7 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufBindVtxAttribState(priv->dk->cmdbuf, pass_priv->vao_attribs, pass_params->num_vertex_attribs);
     dkCmdBufBindVtxBufferState(priv->dk->cmdbuf, &pass_priv->vao_state, 1);
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
-    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, 0);
-    dkCmdBufSignalFence(priv->dk->cmdbuf, &tex_priv->fence, false);
+    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
 }
@@ -1138,20 +1118,16 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
         dkMemBlockGetGpuAddr(priv->sampler_descriptors), priv->num_descriptors);
     dkCmdBufDispatchCompute(priv->dk->cmdbuf, params->compute_groups[0],
         params->compute_groups[1], params->compute_groups[2]);
-    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, 0);
+    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Full, DkInvalidateFlags_Shader | DkInvalidateFlags_Image);
 
     for (int i = 0; i < params->num_values; ++i) {
         struct ra_renderpass_input_val *val = &params->values[i];
         struct ra_renderpass_input     *inp = &params->pass->params.inputs[val->index];
 
-        if (inp->type == RA_VARTYPE_IMG_W) {
-            struct ra_tex         *inp_tex = *(struct ra_tex **)val->data;
-            struct ra_tex_dk *inp_tex_priv = inp_tex->priv;
-            dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_tex_priv->fence, false);
-        } else if (inp->type == RA_VARTYPE_BUF_RW) {
+        if (inp->type == RA_VARTYPE_BUF_RW) {
             struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
             struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
-            dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, false);
+            dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, true);
         }
     }
 
@@ -1176,28 +1152,29 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
             case RA_VARTYPE_IMG_W:
                 struct ra_tex         *inp_tex = *(struct ra_tex **)val->data;
                 struct ra_tex_dk *inp_tex_priv = inp_tex->priv;
-                dkCmdBufWaitFence(priv->dk->cmdbuf, &inp_tex_priv->fence);
-                if (inp->type == RA_VARTYPE_TEX) {
-                    dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_tex_priv->fence, false);
+                if (inp->type == RA_VARTYPE_TEX)
                     dkCmdBufBindTexture(priv->dk->cmdbuf, stage, inp->binding,
                         dkMakeTextureHandle(inp_tex_priv->descriptor_idx, inp_tex_priv->descriptor_idx));
-                } else {
+                else
                     dkCmdBufBindImage(priv->dk->cmdbuf, stage, inp->binding,
                         dkMakeImageHandle(inp_tex_priv->descriptor_idx));
-                }
                 break;
             case RA_VARTYPE_BUF_RO:
             case RA_VARTYPE_BUF_RW:
                 struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
                 struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
-                dkCmdBufWaitFence(priv->dk->cmdbuf, &inp_buf_priv->fence);
+
                 if (inp->type == RA_VARTYPE_BUF_RO) {
-                    dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, false);
                     dkCmdBufBindUniformBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
                 } else {
                     dkCmdBufBindStorageBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
+                }
+
+                if (inp_buf_priv->dirty) {
+                    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Shader);
+                    inp_buf_priv->dirty = false;
                 }
                 break;
             default:
@@ -1209,9 +1186,6 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
         dk_renderpass_run_raster(ra, params);
     else
         dk_renderpass_run_compute(ra, params);
-
-    // TODO: Fix sync across the whole backend
-    dkQueueWaitIdle(priv->dk->queue);
 }
 
 static void dk_debug_marker(struct ra *ra, const char *msg) {
