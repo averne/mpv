@@ -45,7 +45,11 @@ typedef struct mpv_deko3d_fbo {
     /**
      * Fence object which signals that the corresponding texture can be rendered to.
      */
-    DkFence *fence;
+    DkFence *ready_fence;
+    /**
+     * Fence object which signals that the corresponding texture is finished being rendered to.
+     */
+    DkFence *done_fence;
     /**
      * Valid dimensions. This must refer to the size of the framebuffer. This
      * must always be set.

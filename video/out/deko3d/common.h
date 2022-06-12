@@ -29,12 +29,4 @@ typedef struct {
     DkMemBlock cmdbuf_memblock;
     DkCmdBuf cmdbuf;
     atomic_bool can_clear_cmdbuf;
-
-    // Temporary memblocks used for mapping buffers in the GPU address space
-    // Freed at some point when the frame is completed
-    struct ra_dk_tmp_memblock {
-        DkMemBlock blk;
-        DkFence fence;
-    } *tmp_memblocks;
-    size_t num_tmp_memblocks;
 } mp_dk_ctx;

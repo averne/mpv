@@ -12,7 +12,7 @@ struct priv {
     struct ra_ctx *ra_ctx;
 
     mp_dk_ctx *dk;
-    DkFence *client_fence;
+    DkFence *done_fence;
 
     struct ra_tex *cur_fbo;
 };
@@ -56,6 +56,8 @@ static int init(struct libmpv_gpu_context *ctx, mpv_render_param *params) {
 static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, struct ra_tex **out) {
     struct priv *priv = ctx->priv;
 
+    MP_VERBOSE(ctx, "%s\n", __func__);
+
     mpv_deko3d_fbo *fbo =
         get_mpv_render_param(params, MPV_RENDER_PARAM_DEKO3D_FBO, NULL);
 
@@ -84,8 +86,12 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
 
     *out = priv->cur_fbo;
 
-    priv->client_fence = fbo->fence;
-    dkQueueWaitFence(priv->dk->queue, priv->client_fence);
+    if (atomic_load_explicit(&priv->dk->can_clear_cmdbuf, memory_order_relaxed))
+        dkCmdBufClear(priv->dk->cmdbuf);
+
+    // Wait for the framebuffer to be free
+    priv->done_fence = fbo->done_fence;
+    dkQueueWaitFence(priv->dk->queue, fbo->ready_fence);
 
     return 0;
 }
@@ -95,25 +101,9 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
 
     MP_VERBOSE(ctx, "%s\n", __func__);
 
-    // Wait for all the rendering tasks to complete
-    // It would be better to forward a fence to the presentation queue, but the deko3d API doesn't support that
-    dkQueueSignalFence(priv->dk->queue, priv->client_fence, false);
+    // Signal that all the rendering tasks have completed
+    dkQueueSignalFence(priv->dk->queue, priv->done_fence, true);
     dkQueueFlush(priv->dk->queue);
-
-    if (atomic_load_explicit(&priv->dk->can_clear_cmdbuf, memory_order_relaxed))
-        dkCmdBufClear(priv->dk->cmdbuf);
-
-    // Fences have to stay in place in memory in order to get signalled correctly
-    // Thus we work our way *down* the list and break once a command hasn't been completed
-    // Note that polling (internal) fences is cheap and doesn't involve IPC
-    for (int i = priv->dk->num_tmp_memblocks - 1; i > -1; --i) {
-        if (dkFenceWait(&priv->dk->tmp_memblocks[i].fence, 0) == DkResult_Success) {
-            dkMemBlockDestroy(priv->dk->tmp_memblocks[i].blk);
-            priv->dk->num_tmp_memblocks--;
-        } else {
-            break;
-        }
-    }
 }
 
 static void destroy(struct libmpv_gpu_context *ctx) {

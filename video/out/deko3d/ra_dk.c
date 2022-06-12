@@ -262,10 +262,10 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
         return -1;
     dkCmdBufAddMemory(priv->dk->cmdbuf, priv->dk->cmdbuf_memblock, 0, CMD_MEM_SIZE);
 
-    DkQueueMaker queueMaker;
-    dkQueueMakerDefaults(&queueMaker, priv->dk->device);
-    queueMaker.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute | DkQueueFlags_DisableZcull;
-    priv->dk->queue = dkQueueCreate(&queueMaker);
+    DkQueueMaker queue_maker;
+    dkQueueMakerDefaults(&queue_maker, priv->dk->device);
+    queue_maker.flags = DkQueueFlags_Graphics | DkQueueFlags_Compute | DkQueueFlags_DisableZcull;
+    priv->dk->queue = dkQueueCreate(&queue_maker);
     if (!priv->dk->queue)
         return -1;
 
@@ -293,11 +293,6 @@ static void dk_destroy(struct ra *ra) {
         dkMemBlockDestroy(priv->image_descriptors);
     if (priv->sampler_descriptors)
         dkMemBlockDestroy(priv->sampler_descriptors);
-
-    for (int i = 0; i < priv->dk->num_tmp_memblocks; ++i) {
-        if (priv->dk->tmp_memblocks[i].blk)
-            dkMemBlockDestroy(priv->dk->tmp_memblocks[i].blk);
-    }
 
     talloc_free(priv);
 }
@@ -384,7 +379,7 @@ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *p
     layout_maker.dimensions[0] = params->w;
     layout_maker.dimensions[1] = params->h;
     layout_maker.dimensions[2] = params->d;
-    layout_maker.flags         = DkImageFlags_Usage2DEngine | // Always allow 2D engine usage for screenshots (see dk_tex_download)
+    layout_maker.flags         = DkImageFlags_HwCompression | DkImageFlags_Usage2DEngine | // Always allow 2D engine usage for screenshots (see dk_tex_download)
         ((params->render_src || params->render_dst) ? DkImageFlags_UsageRender    : 0) |
         ( params->storage_dst                       ? DkImageFlags_UsageLoadStore : 0) |
         ((params->blit_src   || params->blit_dst)   ? DkImageFlags_Usage2DEngine  : 0);
@@ -425,31 +420,16 @@ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *p
     dkImageInitialize(&tex_priv->image, &tex_layout, tex_priv->memblock, 0);
 
     if (params->initial_data) {
-        struct ra_buf *buf = dk_buf_create(ra, &(struct ra_buf_params){
-            .size         = params->w * params->h * params->format->pixel_size,
-            .initial_data = params->initial_data,
-        });
-        if (!buf) {
-            dk_buf_destroy(ra, buf);
-            dk_tex_destroy(ra, tex);
-            return NULL;
-        }
-
         bool ret = dk_tex_upload(ra, &(struct ra_tex_upload_params){
             .tex    = tex,
-            .buf    = buf,
+            .src    = params->initial_data,
             .stride = params->w * params->format->pixel_size,
         });
+
         if (!ret) {
-            dk_buf_destroy(ra, buf);
             dk_tex_destroy(ra, tex);
             return NULL;
         }
-
-        struct ra_buf_dk *buf_priv = buf->priv;
-        dkFenceWait(&buf_priv->fence, -1);
-
-        dk_buf_destroy(ra, buf);
     }
 
     ra_dk_register_texture(ra, tex);
@@ -482,6 +462,7 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
     }
 
     DkCopyBuf tex_copy;
+    DkMemBlock memblock = NULL;
     if (params->buf) {
         struct ra_buf_dk *buf_priv = params->buf->priv;
         tex_copy = (DkCopyBuf){
@@ -489,7 +470,7 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
             params->stride, tex_rect.height * tex_rect.depth,
         };
     } else {
-        // Map the provided buffer into the GPU address space and mark it to be removed from it later
+        // Map the provided buffer into the GPU address space
         size_t memblk_off  = (uintptr_t)params->src & (DK_MEMBLOCK_ALIGNMENT - 1);
         size_t memblk_size = params->stride * tex_rect.height * tex_rect.depth + memblk_off;
 
@@ -498,12 +479,9 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
         memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
         memblock_maker.storage = (uint8_t *)params->src - memblk_off;
 
-        DkMemBlock memblock = dkMemBlockCreate(&memblock_maker);
+        memblock = dkMemBlockCreate(&memblock_maker);
         if (!memblock)
             return false;
-
-        MP_TARRAY_APPEND(ra, priv->dk->tmp_memblocks, priv->dk->num_tmp_memblocks,
-            (struct ra_dk_tmp_memblock){memblock});
 
         tex_copy = (DkCopyBuf){
             dkMemBlockGetGpuAddr(memblock) + memblk_off,
@@ -511,14 +489,28 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
         };
     }
 
-    dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
-    if (params->buf)
-        dkCmdBufSignalFence(priv->dk->cmdbuf, &((struct ra_buf_dk *)params->buf->priv)->fence, false);
+    DkFence fence, *done_fence;
+    if (params->buf) {
+        struct ra_buf_dk *buf_priv = params->buf->priv;
+        done_fence = &buf_priv->fence;
+        dkCmdBufWaitFence(priv->dk->cmdbuf, &buf_priv->fence);
+    } else {
+        done_fence = &fence;
+    }
 
+    dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
+    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Image);
+    dkCmdBufSignalFence(priv->dk->cmdbuf, done_fence, false);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
 
-    return true;
+    // Wait for the copy to finish before returning
+    bool ret = dkFenceWait(done_fence, -1) == DkResult_Success;
+
+    if (!params->buf)
+        dkMemBlockDestroy(memblock);
+
+    return ret;
 }
 
 static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params) {
@@ -537,9 +529,9 @@ static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params
         1,
     };
 
-    // Map the provided buffer into the GPU address space and mark it to be removed from it later
-    // The buffer might not be aligned correctly so map the range containing it,
-    // and it an offset to the copy command
+    // Map the provided buffer into the GPU address space
+    // The buffer might not be aligned correctly so map a range containing it,
+    // and pass an offset to the copy command
     size_t memblk_off  = (uintptr_t)params->dst & (DK_MEMBLOCK_ALIGNMENT - 1);
     size_t memblk_size = memblk_off + params->stride * params->tex->params.h;
 
@@ -584,20 +576,13 @@ static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
     dkQueueFlush(priv->dk->queue);
 
-    // Wait here to avoid the caller functions reading while the command is being processed
-    // This is an uncommon operation anyways (only used for screenshots)
-    // Wait 10ms at most
-    bool ret;
-    if (dkFenceWait(&fence, -1) != DkResult_Success) {
-        ret = false;
-        goto done;
-    }
+    // Wait for the copy to finish before returning
+    bool ret = dkFenceWait(&fence, -1) == DkResult_Success;
 
     atomic_store(&priv->dk->can_clear_cmdbuf, true);
-    ret = true;
 
-done:
     dkMemBlockDestroy(memblock);
+
     return ret;
 }
 
@@ -663,7 +648,7 @@ static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
 
     buf_priv->dirty = true;
 
-    // Not needed since buffers are currently all cpu-uncached
+    // Not needed since buffers are all cpu-uncached
     // dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
 }
 
@@ -693,7 +678,6 @@ static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct m
     dkCmdBufSetScissors(priv->dk->cmdbuf, 0, &dkscissor, 1);
     dkCmdBufClearColorFloat(priv->dk->cmdbuf, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    // dkQueueFlush(priv->dk->queue);
 }
 
 static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
@@ -734,7 +718,6 @@ static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
     dkCmdBufBlitImage(priv->dk->cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect,
         flags, 0);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    dkQueueFlush(priv->dk->queue);
 }
 
 static int dk_desc_namespace(struct ra *ra, enum ra_vartype type) {
@@ -855,12 +838,14 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
 
     if (!params->cached_program.len ||
             !load_shader_code(ra, pass, params->cached_program, &pass_priv->shaders[0], &pass_priv->shaders[1], NULL)) {
+        bool error = false;
+
         uam_compiler *vsh_compiler = uam_create_compiler(DkStage_Vertex),
             *fsh_compiler = uam_create_compiler(DkStage_Fragment);
         if (!vsh_compiler || !fsh_compiler) {
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         if (!uam_compile_dksh(vsh_compiler, params->vertex_shader) ||
@@ -868,7 +853,7 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
             MP_ERR(ra, "Failed to compile shaders\n");
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         size_t vsh_size = uam_get_code_size(vsh_compiler), fsh_size = uam_get_code_size(fsh_compiler);
@@ -881,7 +866,7 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
         if (!pass_priv->shader_memblock) {
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         uam_write_code(vsh_compiler, (uint8_t *)dkMemBlockGetCpuAddr(pass_priv->shader_memblock) + vsh_off);
@@ -898,17 +883,16 @@ static struct ra_renderpass *dk_renderpass_create_raster(struct ra *ra, struct r
         dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, fsh_off);
         dkShaderInitialize(&pass_priv->shaders[1], &shader_maker);
 
-        goto success;
-
 fail:
         if (vsh_compiler)
             uam_free_compiler(vsh_compiler);
         if (fsh_compiler)
             uam_free_compiler(fsh_compiler);
-        return NULL;
+
+        if (error)
+            return NULL;
     }
 
-success:
     pass_priv->vao_attribs = talloc_array(pass, DkVtxAttribState, params->num_vertex_attribs);
     if (!pass_priv->vao_attribs) {
         dk_renderpass_destroy(ra, pass);
@@ -957,7 +941,7 @@ success:
 }
 
 static struct ra_renderpass *dk_renderpass_create_compute(struct ra *ra, struct ra_renderpass *pass,
-                                                         const struct ra_renderpass_params *params) {
+                                                          const struct ra_renderpass_params *params) {
     struct priv             *priv = ra->priv;
     struct ra_rpass_dk *pass_priv = pass->priv;
     DkMemBlockMaker memblock_maker;
@@ -976,18 +960,20 @@ static struct ra_renderpass *dk_renderpass_create_compute(struct ra *ra, struct 
 
     if (!params->cached_program.len ||
             !load_shader_code(ra, pass, params->cached_program, NULL, NULL, &pass_priv->shaders[0])) {
+        bool error = false;
+
         uam_compiler *sh_compiler = uam_create_compiler(DkStage_Compute);
         if (!sh_compiler) {
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         if (!uam_compile_dksh(sh_compiler, params->compute_shader)) {
             MP_ERR(ra, "Failed to compile shader\n");
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         size_t sh_size = uam_get_code_size(sh_compiler);
@@ -998,7 +984,7 @@ static struct ra_renderpass *dk_renderpass_create_compute(struct ra *ra, struct 
         if (!pass_priv->shader_memblock) {
             dk_renderpass_destroy(ra, pass);
             ta_free(pass);
-            goto fail;
+            error = true; goto fail;
         }
 
         uam_write_code(sh_compiler, dkMemBlockGetCpuAddr(pass_priv->shader_memblock));
@@ -1009,15 +995,14 @@ static struct ra_renderpass *dk_renderpass_create_compute(struct ra *ra, struct 
         dkShaderMakerDefaults(&shader_maker, pass_priv->shader_memblock, 0);
         dkShaderInitialize(&pass_priv->shaders[0], &shader_maker);
 
-        goto success;
-
 fail:
         if (sh_compiler)
             uam_free_compiler(sh_compiler);
-        return NULL;
+
+        if (error)
+            return NULL;
     }
 
-success:
     return pass;
 }
 
@@ -1103,7 +1088,6 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    dkQueueFlush(priv->dk->queue);
 }
 
 static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_run_params *params) {
@@ -1132,18 +1116,19 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
     }
 
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    dkQueueFlush(priv->dk->queue);
 }
 
 static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_params *params) {
     struct priv *priv = ra->priv;
 
-    MP_VERBOSE(ra, "%s\n", __func__);
+    MP_VERBOSE(ra, "%s: %s\n", __func__,
+        (params->pass->params.type == RA_RENDERPASS_TYPE_RASTER) ? "raster" : "compute");
 
     DkStage stage = (params->pass->params.type == RA_RENDERPASS_TYPE_RASTER) ?
         DkStage_Fragment : DkStage_Compute;
 
     for (int i = 0; i < params->num_values; ++i) {
+        bool has_buf_barrier = false;
         struct ra_renderpass_input_val *val = &params->values[i];
         struct ra_renderpass_input     *inp = &params->pass->params.inputs[val->index];
 
@@ -1173,7 +1158,10 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
                 }
 
                 if (inp_buf_priv->dirty) {
-                    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Shader);
+                    if (!has_buf_barrier) {
+                        dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Shader);
+                        has_buf_barrier = true;
+                    }
                     inp_buf_priv->dirty = false;
                 }
                 break;
