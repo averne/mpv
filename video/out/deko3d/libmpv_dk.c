@@ -10,11 +10,13 @@
 
 struct priv {
     struct ra_ctx *ra_ctx;
-
     mp_dk_ctx *dk;
-    DkFence *done_fence;
 
     struct ra_tex *cur_fbo;
+
+    bool first_frame;
+
+    DkFence *client_done_fence;
 };
 
 static int init(struct libmpv_gpu_context *ctx, mpv_render_param *params) {
@@ -50,13 +52,13 @@ static int init(struct libmpv_gpu_context *ctx, mpv_render_param *params) {
     priv->cur_fbo       = talloc_zero(priv, struct ra_tex);
     priv->cur_fbo->priv = talloc_zero(priv, struct ra_tex_dk);
 
+    priv->first_frame = true;
+
     return 0;
 }
 
 static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, struct ra_tex **out) {
     struct priv *priv = ctx->priv;
-
-    MP_VERBOSE(ctx, "%s\n", __func__);
 
     mpv_deko3d_fbo *fbo =
         get_mpv_render_param(params, MPV_RENDER_PARAM_DEKO3D_FBO, NULL);
@@ -86,14 +88,38 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
 
     *out = priv->cur_fbo;
 
-    if (atomic_load_explicit(&priv->dk->can_clear_cmdbuf, memory_order_relaxed))
-        dkCmdBufClear(priv->dk->cmdbuf);
-
-    // Wait for the framebuffer to be free
-    priv->done_fence = fbo->done_fence;
-    dkQueueWaitFence(priv->dk->queue, fbo->ready_fence);
-
     return 0;
+}
+
+static void begin_frame(struct libmpv_gpu_context *ctx, mpv_render_param *params, struct ra_tex *tex) {
+    struct priv *priv = ctx->priv;
+
+    MP_VERBOSE(ctx, "%s\n", __func__);
+
+    // Wait for the queue operations submitted during initialization to complete
+    if (priv->first_frame) {
+        dkQueueWaitIdle(priv->dk->queue);
+        priv->first_frame = false;
+    }
+
+    // Cycle through the command buffer memory
+    priv->dk->cur_cmdbuf_slice = (priv->dk->cur_cmdbuf_slice + 1) % RA_DK_NUM_CMDBUFS;
+    dkCmdBufClear(priv->dk->cmdbuf);
+    dkCmdBufAddMemory(priv->dk->cmdbuf, priv->dk->cmdbuf_memblock,
+        priv->dk->cur_cmdbuf_slice * RA_DK_CMDBUF_SIZE, RA_DK_CMDBUF_SIZE);
+
+    // Starting a new render cycle would overwrite the command buffer for the in-flight frame
+    // Despite the gpu-side wait inserted before queuing the frame, the rendering is not guaranteed
+    // to have completed when the dequeue operation returns, when using triple+ buffering
+    dkFenceWait(&priv->dk->cmdbuf_fences[priv->dk->cur_cmdbuf_slice], -1);
+
+    mpv_deko3d_fbo *fbo =
+        get_mpv_render_param(params, MPV_RENDER_PARAM_DEKO3D_FBO, NULL);
+
+    priv->client_done_fence = fbo->done_fence;
+
+    // Wait for the framebuffer to be free to write to
+    dkQueueWaitFence(priv->dk->queue, fbo->ready_fence);
 }
 
 static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
@@ -102,7 +128,9 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
     MP_VERBOSE(ctx, "%s\n", __func__);
 
     // Signal that all the rendering tasks have completed
-    dkQueueSignalFence(priv->dk->queue, priv->done_fence, true);
+    dkQueueSignalFence(priv->dk->queue,
+        &priv->dk->cmdbuf_fences[priv->dk->cur_cmdbuf_slice], false);
+    dkQueueSignalFence(priv->dk->queue, priv->client_done_fence, false);
     dkQueueFlush(priv->dk->queue);
 }
 
@@ -116,9 +144,10 @@ static void destroy(struct libmpv_gpu_context *ctx) {
 }
 
 const struct libmpv_gpu_context_fns libmpv_gpu_context_dk = {
-    .api_name   = MPV_RENDER_API_TYPE_DEKO3D,
-    .init       = init,
-    .wrap_fbo   = wrap_fbo,
-    .done_frame = done_frame,
-    .destroy    = destroy,
+    .api_name    = MPV_RENDER_API_TYPE_DEKO3D,
+    .init        = init,
+    .wrap_fbo    = wrap_fbo,
+    .begin_frame = begin_frame,
+    .done_frame  = done_frame,
+    .destroy     = destroy,
 };

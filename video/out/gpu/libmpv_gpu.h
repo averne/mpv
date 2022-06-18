@@ -29,6 +29,9 @@ struct libmpv_gpu_context_fns {
     // This does not need to care about generic attributes, like flipping.
     int (*wrap_fbo)(struct libmpv_gpu_context *ctx, mpv_render_param *params,
                     struct ra_tex **out);
+    // Signal that the ra_tex object obtained with wrap_fbo is about to
+    // get rendered to.
+    void (*begin_frame)(struct libmpv_gpu_context *ctx, mpv_render_param *params, struct ra_tex *tex);
     // Signal that the ra_tex object obtained with wrap_fbo is no longer used.
     // For certain backends, this might also be used to signal the end of
     // rendering (like OpenGL doing weird crap).

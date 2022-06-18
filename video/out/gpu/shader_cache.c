@@ -831,6 +831,8 @@ static void gl_sc_generate(struct gl_shader_cache *sc,
                 assert(e->dim_v == 2 && e->type == RA_VARTYPE_FLOAT);
                 ADD(vert_head, "%s%s vec2 vertex_position;\n", loc, vert_in);
                 ADD(vert_body, "gl_Position = vec4(vertex_position, 1.0, 1.0);\n");
+                if (sc->ra->glsl_deko3d)
+                    ADD(vert_body, "gl_Position.y = -gl_Position.y;\n");
             } else {
                 ADD(vert_head, "%s%s %s vertex_%s;\n", loc, vert_in, glsl_type, e->name);
                 ADD(vert_head, "%s%s %s %s;\n", loc, vert_out, glsl_type, e->name);

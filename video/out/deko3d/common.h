@@ -21,12 +21,15 @@
 
 #include <deko3d.h>
 
-#include "osdep/atomic.h"
+#define RA_DK_NUM_CMDBUFS 2
+#define RA_DK_CMDBUF_SIZE MP_ALIGN_UP(0x10000, DK_MEMBLOCK_ALIGNMENT)
 
 typedef struct {
     DkDevice device;
     DkQueue queue;
-    DkMemBlock cmdbuf_memblock;
+
     DkCmdBuf cmdbuf;
-    atomic_bool can_clear_cmdbuf;
+    DkMemBlock cmdbuf_memblock;
+    int cur_cmdbuf_slice;
+    DkFence cmdbuf_fences[RA_DK_NUM_CMDBUFS];
 } mp_dk_ctx;
