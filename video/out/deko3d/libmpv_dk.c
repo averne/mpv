@@ -94,7 +94,7 @@ static int wrap_fbo(struct libmpv_gpu_context *ctx, mpv_render_param *params, st
 static void begin_frame(struct libmpv_gpu_context *ctx, mpv_render_param *params, struct ra_tex *tex) {
     struct priv *priv = ctx->priv;
 
-    MP_VERBOSE(ctx, "%s\n", __func__);
+    MP_TRACE(ctx, "%s\n", __func__);
 
     // Wait for the queue operations submitted during initialization to complete
     if (priv->first_frame) {
@@ -125,7 +125,7 @@ static void begin_frame(struct libmpv_gpu_context *ctx, mpv_render_param *params
 static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
     struct priv *priv = ctx->priv;
 
-    MP_VERBOSE(ctx, "%s\n", __func__);
+    MP_TRACE(ctx, "%s\n", __func__);
 
     // Signal that all the rendering tasks have completed
     dkQueueSignalFence(priv->dk->queue,

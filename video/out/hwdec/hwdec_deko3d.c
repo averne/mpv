@@ -154,8 +154,6 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
     struct priv *priv = mapper->priv;
     AVTX1Map     *map = (AVTX1Map *)mapper->src->planes[3];
 
-    MP_VERBOSE(mapper, "%s, map handle %#x\n", __func__, ff_tx1_map_get_handle(map));
-
     for (int i = 0; i < priv->num_cached_textures; ++i) {
         if (priv->cached_textures[i].handle == ff_tx1_map_get_handle(map)) {
             mapper->tex[0]->priv = priv->cached_textures[i].tex[0];
@@ -205,7 +203,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
 }
 
 static void mapper_unmap(struct ra_hwdec_mapper *mapper) {
-    MP_VERBOSE(mapper, "%s\n", __func__);
+    // Do nothing
 }
 
 const struct ra_hwdec_driver ra_hwdec_tx1 = {
