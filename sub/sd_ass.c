@@ -200,12 +200,14 @@ static void enable_output(struct sd *sd, bool enable)
     } else {
         ctx->ass_renderer = ass_renderer_init(ctx->ass_library);
 
+#ifdef __SWITCH__
         PlFontData font;
         Result rc = plGetSharedFontByType(&font, PlSharedFontType_Standard);
 
         if (R_SUCCEEDED(rc))
             ass_add_font(ctx->ass_library, "nintendo-standard",
                 font.address, font.size);
+#endif
 
         mp_ass_configure_fonts(ctx->ass_renderer, sd->opts->sub_style,
                                sd->global, sd->log);

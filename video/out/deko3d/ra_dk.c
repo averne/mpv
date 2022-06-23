@@ -1139,13 +1139,12 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
                 struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
                 struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
 
-                if (inp->type == RA_VARTYPE_BUF_RO) {
+                if (inp->type == RA_VARTYPE_BUF_RO)
                     dkCmdBufBindUniformBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
-                } else {
+                else
                     dkCmdBufBindStorageBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
-                }
 
                 if (inp_buf_priv->dirty) {
                     if (!has_buf_barrier) {
