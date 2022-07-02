@@ -58,6 +58,9 @@ struct priv {
     DkMemBlock image_descriptors;
     DkMemBlock sampler_descriptors;
     size_t num_descriptors;
+
+    DkMemBlock query_memblock;
+    size_t num_queries;
 };
 
 static const char dk_shadercache_magic[] = "DKCH";
@@ -89,6 +92,10 @@ static void dk_renderpass_destroy(struct ra *ra, struct ra_renderpass *pass);
 static struct ra_renderpass *dk_renderpass_create(struct ra *ra,
                                                   const struct ra_renderpass_params *params);
 static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_params *params);
+static ra_timer *dk_timer_create(struct ra *ra);
+static void dk_timer_destroy(struct ra *ra, ra_timer *timer);
+static void dk_timer_start(struct ra *ra, ra_timer *timer);
+static uint64_t dk_timer_stop(struct ra *ra, ra_timer *timer);
 static void dk_debug_marker(struct ra *ra, const char *msg);
 
 static struct ra_fns ra_fns_dk = {
@@ -108,11 +115,10 @@ static struct ra_fns ra_fns_dk = {
     .renderpass_create  = dk_renderpass_create,
     .renderpass_destroy = dk_renderpass_destroy,
     .renderpass_run     = dk_renderpass_run,
-    // deko3d does not provide timestamp information
-    // .timer_create       = dk_timer_create,
-    // .timer_destroy      = dk_timer_destroy,
-    // .timer_start        = dk_timer_start,
-    // .timer_stop         = dk_timer_stop,
+    .timer_create       = dk_timer_create,
+    .timer_destroy      = dk_timer_destroy,
+    .timer_start        = dk_timer_start,
+    .timer_stop         = dk_timer_stop,
     .debug_marker       = dk_debug_marker,
 };
 
@@ -271,6 +277,16 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     if (!priv->dk->queue)
         return -1;
 
+    // Should be enough to hold all queries (max. 128)
+    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, DK_MEMBLOCK_ALIGNMENT);
+    memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached |
+        DkMemBlockFlags_ZeroFillInit;
+    priv->query_memblock = dkMemBlockCreate(&memblock_maker);
+    if (!priv->query_memblock)
+        return -1;
+
+    priv->num_queries = 0;
+
     return 0;
 }
 
@@ -293,6 +309,9 @@ static void dk_destroy(struct ra *ra) {
         dkMemBlockDestroy(priv->image_descriptors);
     if (priv->sampler_descriptors)
         dkMemBlockDestroy(priv->sampler_descriptors);
+
+    if (priv->query_memblock)
+        dkMemBlockDestroy(priv->query_memblock);
 
     talloc_free(priv);
 }
@@ -1092,7 +1111,7 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
         dkMemBlockGetGpuAddr(priv->sampler_descriptors), priv->num_descriptors);
     dkCmdBufDispatchCompute(priv->dk->cmdbuf, params->compute_groups[0],
         params->compute_groups[1], params->compute_groups[2]);
-    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Full, DkInvalidateFlags_Shader | DkInvalidateFlags_Image);
+    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, DkInvalidateFlags_Shader | DkInvalidateFlags_Image);
 
     for (int i = 0; i < params->num_values; ++i) {
         struct ra_renderpass_input_val *val = &params->values[i];
@@ -1163,6 +1182,52 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
         dk_renderpass_run_raster(ra, params);
     else
         dk_renderpass_run_compute(ra, params);
+}
+
+static ra_timer *dk_timer_create(struct ra *ra) {
+    struct priv *priv = ra->priv;
+
+    struct ra_dk_timer *priv_timer = talloc_zero(NULL, struct ra_dk_timer);
+    if (!priv_timer)
+        return NULL;
+
+    for (int i = 0; i < RA_DK_NUM_QUERIES; ++i)
+        priv_timer->query_idx[i] = priv->num_queries++;
+
+    return priv_timer;
+}
+
+static void dk_timer_destroy(struct ra *ra, ra_timer *timer) {
+    if (timer)
+        talloc_free(timer);
+}
+
+static void dk_timer_start(struct ra *ra, ra_timer *timer) {
+    struct priv *priv              = ra->priv;
+    struct ra_dk_timer *priv_timer = timer;
+
+    priv_timer->cur_idx = (priv_timer->cur_idx + 1) % RA_DK_NUM_QUERIES;
+
+    uint64_t *query_data = (uint64_t *)((uint8_t *)dkMemBlockGetCpuAddr(priv->query_memblock) +
+        (2 * priv_timer->query_idx[priv_timer->cur_idx]) * 16);
+
+    priv_timer->result = MPMAX(dkTimestampToNs(query_data[3] - query_data[1]), 0);
+
+    dkCmdBufReportCounter(priv->dk->cmdbuf, DkCounter_Timestamp,
+        dkMemBlockGetGpuAddr(priv->query_memblock) + (2 * priv_timer->query_idx[priv_timer->cur_idx] + 0) * 16);
+    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, 0);
+    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+}
+
+static uint64_t dk_timer_stop(struct ra *ra, ra_timer *timer) {
+    struct priv *priv              = ra->priv;
+    struct ra_dk_timer *priv_timer = timer;
+
+    dkCmdBufReportCounter(priv->dk->cmdbuf, DkCounter_Timestamp,
+        dkMemBlockGetGpuAddr(priv->query_memblock) + (2 * priv_timer->query_idx[priv_timer->cur_idx] + 1) * 16);
+    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+
+    return priv_timer->result;
 }
 
 static void dk_debug_marker(struct ra *ra, const char *msg) {

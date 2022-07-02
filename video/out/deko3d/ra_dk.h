@@ -59,6 +59,13 @@ struct ra_rpass_dk {
     DkBlendState blend_state;
 };
 
+#define RA_DK_NUM_QUERIES 2
+struct ra_dk_timer {
+    int query_idx[RA_DK_NUM_QUERIES];
+    int cur_idx;
+    uint64_t result;
+};
+
 struct ra *ra_create_dk(mp_dk_ctx *dk, struct mp_log *log);
 mp_dk_ctx *ra_dk_get_ctx(struct ra *ra);
 void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex);
