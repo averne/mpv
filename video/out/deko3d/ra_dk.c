@@ -500,7 +500,7 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
             params->stride, tex_rect.height * tex_rect.depth,
         };
 
-        if (params->buf->params.type == RA_BUF_TYPE_TEX_UPLOAD)
+        if (buf_priv->is_cpu_cached)
             dkMemBlockFlushCpuCache(buf_priv->memblock, params->buf_offset,
                 params->stride * tex_rect.height * tex_rect.depth);
     } else {
@@ -539,8 +539,11 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
     dkQueueFlush(priv->dk->queue);
 
     // Return early, assuming that the buffer will be kept alive until the transfer is complete
-    if (params->buf && params->buf->params.type == RA_BUF_TYPE_TEX_UPLOAD)
-        return true;
+    if (params->buf) {
+        struct ra_buf_dk *buf_priv = params->buf->priv;
+        if (buf_priv->is_cpu_cached)
+            return true;
+    }
 
     // Wait for the copy to finish before returning
     bool ret = dkFenceWait(done_fence, -1) == DkResult_Success;
@@ -630,7 +633,7 @@ static void dk_buf_destroy(struct ra *ra, struct ra_buf *buf) {
 static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *params) {
     struct priv *priv = ra->priv;
 
-    MP_TRACE(ra, "%s, buffer type %d\n", __func__, params->type);
+    MP_TRACE(ra, "%s (type %d)\n", __func__, params->type);
 
     struct ra_buf *buf = talloc_zero(NULL, struct ra_buf);
     if (!buf) {
@@ -646,18 +649,12 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
         return NULL;
     }
 
-    buf_priv->dirty = false;
-    buf_priv->fence = (DkFence){0};
-
-    // The buffer will be used as a PBO or direct rendering staging buffer
-    // In this situation (especially the latter case), the CPU might do a lot of
-    // accesses, and disabling the cache leads to a significant performance decrease
-    uint32_t cpu_cache_flag = (params->type == RA_BUF_TYPE_TEX_UPLOAD) ?
-        DkMemBlockFlags_CpuCached : DkMemBlockFlags_CpuUncached;
+    buf_priv->is_cpu_cached = params->host_mapped || params->host_mutable;
 
     DkMemBlockMaker memblock_maker;
     dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(params->size, DK_MEMBLOCK_ALIGNMENT));
-    memblock_maker.flags = cpu_cache_flag | DkMemBlockFlags_GpuCached;
+    memblock_maker.flags = (buf_priv->is_cpu_cached ? DkMemBlockFlags_CpuCached : DkMemBlockFlags_CpuUncached) |
+        DkMemBlockFlags_GpuCached;
 
     buf_priv->memblock = dkMemBlockCreate(&memblock_maker);
     if (!buf_priv->memblock) {
@@ -669,7 +666,7 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
         buf->data = dkMemBlockGetCpuAddr(buf_priv->memblock);
 
     if (params->initial_data)
-        memcpy(dkMemBlockGetCpuAddr(buf_priv->memblock), params->initial_data, params->size);
+        dk_buf_update(ra, buf, 0, params->initial_data, params->size);
 
     return buf;
 }
@@ -680,7 +677,7 @@ static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
 
     memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
 
-    if (buf->params.type == RA_BUF_TYPE_TEX_UPLOAD)
+    if (buf_priv->is_cpu_cached)
         dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
 
     buf_priv->dirty = true;
@@ -706,7 +703,7 @@ static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct m
 
     dkCmdBufBindRenderTarget(priv->dk->cmdbuf, &tex_view, NULL);
     dkCmdBufSetScissors(priv->dk->cmdbuf, 0, &dkscissor, 1);
-    dkCmdBufClearColorFloat(priv->dk->cmdbuf, 0, DkColorMask_RGBA, color[0], color[1], color[2], color[3]);
+    dkCmdBufClearColor(priv->dk->cmdbuf, 0, DkColorMask_RGBA, (void *)color);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
@@ -1130,7 +1127,7 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
 static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_params *params) {
     struct priv *priv = ra->priv;
 
-    MP_TRACE(ra, "%s: %s\n", __func__,
+    MP_TRACE(ra, "%s (%s)\n", __func__,
         (params->pass->params.type == RA_RENDERPASS_TYPE_RASTER) ? "raster" : "compute");
 
     DkStage stage = (params->pass->params.type == RA_RENDERPASS_TYPE_RASTER) ?

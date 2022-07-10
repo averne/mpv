@@ -42,6 +42,7 @@ struct ra_tex_dk {
 struct ra_buf_dk {
     DkMemBlock memblock;
     DkFence fence;
+    bool is_cpu_cached;
     bool dirty;
 };
 
