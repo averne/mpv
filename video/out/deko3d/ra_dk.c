@@ -1212,7 +1212,6 @@ static void dk_timer_start(struct ra *ra, ra_timer *timer) {
 
     dkCmdBufReportCounter(priv->dk->cmdbuf, DkCounter_Timestamp,
         dkMemBlockGetGpuAddr(priv->query_memblock) + (2 * priv_timer->query_idx[priv_timer->cur_idx] + 0) * 16);
-    dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, 0);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
