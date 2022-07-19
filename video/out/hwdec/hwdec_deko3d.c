@@ -51,6 +51,7 @@ struct priv {
 // Nvdec can render to NV12 and YV12 surfaces, the FFmpeg backend hardcodes for NV12
 static const int supported_formats[] = {
     IMGFMT_NV12,
+    IMGFMT_P010,
     0,
 };
 
