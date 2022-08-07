@@ -58,7 +58,11 @@ struct ra_rpass_dk {
     DkColorState color_state;
     DkColorWriteState color_write_state;
     DkBlendState blend_state;
+    DkDepthStencilState depth_state;
 };
+
+#define RA_DK_MAX_DESCRIPTORS 128
+#define RA_DK_MAX_QUERIES     128
 
 #define RA_DK_NUM_QUERIES 2
 struct ra_dk_timer {

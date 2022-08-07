@@ -55,12 +55,13 @@ const struct dk_format formats[] = {
 struct priv {
     mp_dk_ctx *dk;
 
-    DkMemBlock image_descriptors;
-    DkMemBlock sampler_descriptors;
-    size_t num_descriptors;
+    DkMemBlock           descriptors_memblock;
+    DkSamplerDescriptor *sampler_descriptors;
+    DkImageDescriptor   *image_descriptors;
+    size_t               num_descriptors;
 
     DkMemBlock query_memblock;
-    size_t num_queries;
+    size_t     num_queries;
 };
 
 static const char dk_shadercache_magic[] = "DKCH";
@@ -246,16 +247,14 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     if (!priv->dk->cmdbuf_memblock)
         return -1;
 
-    // Should be enough to hold all descriptors (max. 128)
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, DK_MEMBLOCK_ALIGNMENT);
-    priv->image_descriptors = dkMemBlockCreate(&memblock_maker);
-    if (!priv->image_descriptors)
+    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device,
+        RA_DK_MAX_DESCRIPTORS * (sizeof(DkSamplerDescriptor) + sizeof(DkImageDescriptor)));
+    priv->descriptors_memblock = dkMemBlockCreate(&memblock_maker);
+    if (!priv->descriptors_memblock)
         return -1;
 
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, DK_MEMBLOCK_ALIGNMENT);
-    priv->sampler_descriptors = dkMemBlockCreate(&memblock_maker);
-    if (!priv->sampler_descriptors)
-        return -1;
+    priv->sampler_descriptors = dkMemBlockGetCpuAddr(priv->descriptors_memblock);
+    priv->image_descriptors   = (DkImageDescriptor *)(priv->sampler_descriptors + RA_DK_MAX_DESCRIPTORS);
 
     priv->num_descriptors = 0;
 
@@ -277,8 +276,7 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     if (!priv->dk->queue)
         return -1;
 
-    // Should be enough to hold all queries (max. 128)
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, DK_MEMBLOCK_ALIGNMENT);
+    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, RA_DK_MAX_QUERIES * 16 * 2);
     memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuUncached |
         DkMemBlockFlags_ZeroFillInit;
     priv->query_memblock = dkMemBlockCreate(&memblock_maker);
@@ -305,10 +303,8 @@ static void dk_destroy(struct ra *ra) {
     if (priv->dk->cmdbuf_memblock)
         dkMemBlockDestroy(priv->dk->cmdbuf_memblock);
 
-    if (priv->image_descriptors)
-        dkMemBlockDestroy(priv->image_descriptors);
-    if (priv->sampler_descriptors)
-        dkMemBlockDestroy(priv->sampler_descriptors);
+    if (priv->descriptors_memblock)
+        dkMemBlockDestroy(priv->descriptors_memblock);
 
     if (priv->query_memblock)
         dkMemBlockDestroy(priv->query_memblock);
@@ -333,13 +329,10 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
 
     tex_priv->descriptor_idx = priv->num_descriptors++;
 
-    DkImageDescriptor   *image_descs   = dkMemBlockGetCpuAddr(priv->image_descriptors);
-    DkSamplerDescriptor *sampler_descs = dkMemBlockGetCpuAddr(priv->sampler_descriptors);
-
     DkImageView image_view;
     dkImageViewDefaults(&image_view, &tex_priv->image);
 
-    dkImageDescriptorInitialize(&image_descs[tex_priv->descriptor_idx],
+    dkImageDescriptorInitialize(&priv->image_descriptors[tex_priv->descriptor_idx],
         &image_view, tex->params.storage_dst, false);
 
     DkSampler sampler;
@@ -354,7 +347,8 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
     sampler.mipFilter =
         tex->params.src_linear ? DkMipFilter_Linear : DkMipFilter_Nearest;
 
-    dkSamplerDescriptorInitialize(&sampler_descs[tex_priv->descriptor_idx], &sampler);
+    dkSamplerDescriptorInitialize(&priv->sampler_descriptors[tex_priv->descriptor_idx],
+        &sampler);
 
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Descriptors);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
@@ -933,6 +927,7 @@ fail_2:
     dkRasterizerStateDefaults(&pass_priv->rasterizer_state);
     dkColorStateDefaults(&pass_priv->color_state);
     dkColorWriteStateDefaults(&pass_priv->color_write_state);
+    dkDepthStencilStateDefaults(&pass_priv->depth_state);
 
     pass_priv->rasterizer_state.cullMode = DkFace_None;
 
@@ -943,6 +938,9 @@ fail_2:
             map_blend_factor(params->blend_src_rgb),   map_blend_factor(params->blend_dst_rgb),
             map_blend_factor(params->blend_src_alpha), map_blend_factor(params->blend_dst_alpha));
     }
+
+	pass_priv->depth_state.depthTestEnable = pass_priv->depth_state.depthWriteEnable =
+	    pass_priv->depth_state.stencilTestEnable = false;
 
     return pass;
 
@@ -1083,14 +1081,16 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufBindRasterizerState(priv->dk->cmdbuf, &pass_priv->rasterizer_state);
     dkCmdBufBindColorState(priv->dk->cmdbuf, &pass_priv->color_state);
     dkCmdBufBindColorWriteState(priv->dk->cmdbuf, &pass_priv->color_write_state);
-    dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->image_descriptors), priv->num_descriptors);
     dkCmdBufBindSamplerDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->sampler_descriptors), priv->num_descriptors);
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock), priv->num_descriptors);
+    dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock) + RA_DK_MAX_DESCRIPTORS * sizeof(DkSamplerDescriptor),
+        priv->num_descriptors);
     dkCmdBufBindVtxBuffer(priv->dk->cmdbuf, 0, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
         dkMemBlockGetSize(pass_priv->vao_memblock));
     dkCmdBufBindVtxAttribState(priv->dk->cmdbuf, pass_priv->vao_attribs, pass_params->num_vertex_attribs);
     dkCmdBufBindVtxBufferState(priv->dk->cmdbuf, &pass_priv->vao_state, 1);
+    dkCmdBufBindDepthStencilState(priv->dk->cmdbuf, &pass_priv->depth_state);
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
@@ -1102,10 +1102,11 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
 
     dkCmdBufBindShaders(priv->dk->cmdbuf, DkStageFlag_Compute,
         (DkShader const *[]){&pass_priv->shaders[0]}, 1);
-    dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->image_descriptors), priv->num_descriptors);
     dkCmdBufBindSamplerDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->sampler_descriptors), priv->num_descriptors);
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock), priv->num_descriptors);
+    dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock) + RA_DK_MAX_DESCRIPTORS * sizeof(DkSamplerDescriptor),
+        priv->num_descriptors);
     dkCmdBufDispatchCompute(priv->dk->cmdbuf, params->compute_groups[0],
         params->compute_groups[1], params->compute_groups[2]);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, DkInvalidateFlags_Shader | DkInvalidateFlags_Image);
