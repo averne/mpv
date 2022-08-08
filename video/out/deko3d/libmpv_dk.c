@@ -138,7 +138,8 @@ static void begin_frame(struct libmpv_gpu_context *ctx, mpv_render_param *params
     priv->client_done_fence = fbo->done_fence;
 
     // Wait for the framebuffer to be free to write to
-    dkQueueWaitFence(priv->dk->queue, fbo->ready_fence);
+    if (fbo->ready_fence)
+        dkQueueWaitFence(priv->dk->queue, fbo->ready_fence);
 }
 
 static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
@@ -147,9 +148,10 @@ static void done_frame(struct libmpv_gpu_context *ctx, bool ds) {
     MP_TRACE(ctx, "%s\n", __func__);
 
     // Signal that all the rendering tasks have completed
+    if (priv->client_done_fence)
+        dkQueueSignalFence(priv->dk->queue, priv->client_done_fence, false);
     dkQueueSignalFence(priv->dk->queue,
         &priv->dk->cmdbuf_fences[priv->dk->cur_cmdbuf_slice], false);
-    dkQueueSignalFence(priv->dk->queue, priv->client_done_fence, false);
     dkQueueFlush(priv->dk->queue);
 }
 

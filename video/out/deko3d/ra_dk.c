@@ -351,7 +351,6 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
         &sampler);
 
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Descriptors);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static void dk_tex_destroy(struct ra *ra, struct ra_tex *tex) {
@@ -529,8 +528,6 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
     dkCmdBufCopyBufferToImage(priv->dk->cmdbuf, &tex_copy, &tex_view, &tex_rect, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Image);
     dkCmdBufSignalFence(priv->dk->cmdbuf, done_fence, false);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    dkQueueFlush(priv->dk->queue);
 
     // Return early, assuming that the buffer will be kept alive until the transfer is complete
     if (params->buf) {
@@ -540,6 +537,8 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
     }
 
     // Wait for the copy to finish before returning
+    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+    dkQueueFlush(priv->dk->queue);
     bool ret = dkFenceWait(done_fence, -1) == DkResult_Success;
 
     if (!params->buf)
@@ -604,10 +603,10 @@ static bool dk_tex_download(struct ra *ra, struct ra_tex_download_params *params
     dkCmdBufBlitImage(priv->dk->cmdbuf, &tex_view, &tex_rect, &dst_view, &tex_rect,
         DkBlitFlag_ModeBlit, 0);
     dkCmdBufSignalFence(priv->dk->cmdbuf, &fence, true); // Flush GPU cache
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-    dkQueueFlush(priv->dk->queue);
 
     // Wait for the copy to finish before returning
+    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+    dkQueueFlush(priv->dk->queue);
     bool ret = dkFenceWait(&fence, -1) == DkResult_Success;
 
     dkMemBlockDestroy(memblock);
@@ -698,7 +697,6 @@ static void dk_clear(struct ra *ra, struct ra_tex *dst, float color[4], struct m
     dkCmdBufBindRenderTarget(priv->dk->cmdbuf, &tex_view, NULL);
     dkCmdBufSetScissors(priv->dk->cmdbuf, 0, &dkscissor, 1);
     dkCmdBufClearColor(priv->dk->cmdbuf, 0, DkColorMask_RGBA, (void *)color);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
@@ -736,7 +734,6 @@ static void dk_blit(struct ra *ra, struct ra_tex *dst, struct ra_tex *src,
 
     dkCmdBufBlitImage(priv->dk->cmdbuf, &src_view, &src_rect, &dst_view, &dst_rect,
         flags, 0);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static int dk_desc_namespace(struct ra *ra, enum ra_vartype type) {
@@ -1093,7 +1090,6 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufBindDepthStencilState(priv->dk->cmdbuf, &pass_priv->depth_state);
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_run_params *params) {
@@ -1121,8 +1117,6 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
             dkCmdBufSignalFence(priv->dk->cmdbuf, &inp_buf_priv->fence, true);
         }
     }
-
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_params *params) {
@@ -1209,11 +1203,10 @@ static void dk_timer_start(struct ra *ra, ra_timer *timer) {
     uint64_t *query_data = (uint64_t *)((uint8_t *)dkMemBlockGetCpuAddr(priv->query_memblock) +
         (2 * priv_timer->query_idx[priv_timer->cur_idx]) * 16);
 
-    priv_timer->result = MPMAX(dkTimestampToNs(query_data[3] - query_data[1]), 0);
+    priv_timer->result = (query_data[3] > query_data[1]) ? dkTimestampToNs(query_data[3] - query_data[1]) : 0;
 
     dkCmdBufReportCounter(priv->dk->cmdbuf, DkCounter_Timestamp,
         dkMemBlockGetGpuAddr(priv->query_memblock) + (2 * priv_timer->query_idx[priv_timer->cur_idx] + 0) * 16);
-    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 }
 
 static uint64_t dk_timer_stop(struct ra *ra, ra_timer *timer) {
@@ -1222,6 +1215,8 @@ static uint64_t dk_timer_stop(struct ra *ra, ra_timer *timer) {
 
     dkCmdBufReportCounter(priv->dk->cmdbuf, DkCounter_Timestamp,
         dkMemBlockGetGpuAddr(priv->query_memblock) + (2 * priv_timer->query_idx[priv_timer->cur_idx] + 1) * 16);
+
+    // Submit here to keep both counter commands in the same submission
     dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
 
     return priv_timer->result;
