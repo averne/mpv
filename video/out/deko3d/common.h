@@ -22,7 +22,7 @@
 #include <deko3d.h>
 
 #define RA_DK_NUM_CMDBUFS 3
-#define RA_DK_CMDBUF_SIZE MP_ALIGN_UP(0x4000, DK_MEMBLOCK_ALIGNMENT)
+#define RA_DK_CMDBUF_SIZE MP_ALIGN_UP(0x10000, DK_MEMBLOCK_ALIGNMENT)
 
 typedef struct {
     DkDevice device;
