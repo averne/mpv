@@ -43,7 +43,7 @@ struct priv {
     struct cached_texture {
         uint32_t handle;
         DkMemBlock memblock;
-        struct ra_dk_tex *tex[2];
+        struct ra_tex_dk *tex[2];
     } *cached_textures;
     int num_cached_textures;
 };
@@ -146,6 +146,8 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
     MP_VERBOSE(mapper, "%s\n", __func__);
 
     for (int i = 0; i < priv->num_cached_textures; ++i) {
+        ra_dk_unregister_texture(mapper->ra, priv->cached_textures[i].tex[0]);
+        ra_dk_unregister_texture(mapper->ra, priv->cached_textures[i].tex[1]);
         if (priv->cached_textures[i].memblock)
             dkMemBlockDestroy(priv->cached_textures[i].memblock);
     }

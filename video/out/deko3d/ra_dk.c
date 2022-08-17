@@ -58,11 +58,12 @@ struct priv {
     DkMemBlock           descriptors_memblock;
     DkSamplerDescriptor *sampler_descriptors;
     DkImageDescriptor   *image_descriptors;
-    size_t               num_descriptors;
+    uint64_t             allocated_descriptors[2];
 
     DkMemBlock query_memblock;
     size_t     num_queries;
 };
+_Static_assert(sizeof(((struct priv *)0)->allocated_descriptors) * __CHAR_BIT__ == RA_DK_MAX_DESCRIPTORS);
 
 static const char dk_shadercache_magic[] = "DKCH";
 static const int dk_shadercache_version = 1;
@@ -256,7 +257,7 @@ static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
     priv->sampler_descriptors = dkMemBlockGetCpuAddr(priv->descriptors_memblock);
     priv->image_descriptors   = (DkImageDescriptor *)(priv->sampler_descriptors + RA_DK_MAX_DESCRIPTORS);
 
-    priv->num_descriptors = 0;
+    memset(priv->allocated_descriptors, 0, sizeof(priv->allocated_descriptors));
 
     DkCmdBufMaker cmdbuf_maker;
     dkCmdBufMakerDefaults(&cmdbuf_maker, priv->dk->device);
@@ -327,7 +328,21 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
     struct priv          *priv = ra->priv;
     struct ra_tex_dk *tex_priv = tex->priv;
 
-    tex_priv->descriptor_idx = priv->num_descriptors++;
+    tex_priv->descriptor_idx = -1;
+    for (int i = 0; i < MP_ARRAY_SIZE(priv->allocated_descriptors); ++i) {
+        uint64_t *pos = &priv->allocated_descriptors[i];
+        if (*pos == -1ull)
+            continue;
+        tex_priv->descriptor_idx = __builtin_ctzll(~*pos);
+        *pos |= (1ull << tex_priv->descriptor_idx);
+        break;
+    }
+
+    if (tex_priv->descriptor_idx < 0) {
+        MP_ERR(ra, "No more free descriptor slots for texture %dx%dx%d %s\n",
+            tex->params.w, tex->params.h, tex->params.d, tex->params.format->name);
+        return;
+    }
 
     DkImageView image_view;
     dkImageViewDefaults(&image_view, &tex_priv->image);
@@ -353,8 +368,16 @@ void ra_dk_register_texture(struct ra *ra, struct ra_tex *tex) {
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Descriptors);
 }
 
+void ra_dk_unregister_texture(struct ra *ra, struct ra_tex_dk *tex) {
+    struct priv *priv = ra->priv;
+
+    priv->allocated_descriptors[tex->descriptor_idx / 64] &= ~(1ull << (tex->descriptor_idx % 64));
+}
+
 static void dk_tex_destroy(struct ra *ra, struct ra_tex *tex) {
     struct ra_tex_dk *tex_priv = tex->priv;
+
+    ra_dk_unregister_texture(ra, tex_priv);
 
     if (tex_priv->memblock)
         dkMemBlockDestroy(tex_priv->memblock);
@@ -1079,10 +1102,10 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufBindColorState(priv->dk->cmdbuf, &pass_priv->color_state);
     dkCmdBufBindColorWriteState(priv->dk->cmdbuf, &pass_priv->color_write_state);
     dkCmdBufBindSamplerDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->descriptors_memblock), priv->num_descriptors);
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock), RA_DK_MAX_DESCRIPTORS);
     dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
         dkMemBlockGetGpuAddr(priv->descriptors_memblock) + RA_DK_MAX_DESCRIPTORS * sizeof(DkSamplerDescriptor),
-        priv->num_descriptors);
+        RA_DK_MAX_DESCRIPTORS);
     dkCmdBufBindVtxBuffer(priv->dk->cmdbuf, 0, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
         dkMemBlockGetSize(pass_priv->vao_memblock));
     dkCmdBufBindVtxAttribState(priv->dk->cmdbuf, pass_priv->vao_attribs, pass_params->num_vertex_attribs);
@@ -1099,10 +1122,10 @@ static void dk_renderpass_run_compute(struct ra *ra, const struct ra_renderpass_
     dkCmdBufBindShaders(priv->dk->cmdbuf, DkStageFlag_Compute,
         (DkShader const *[]){&pass_priv->shaders[0]}, 1);
     dkCmdBufBindSamplerDescriptorSet(priv->dk->cmdbuf,
-        dkMemBlockGetGpuAddr(priv->descriptors_memblock), priv->num_descriptors);
+        dkMemBlockGetGpuAddr(priv->descriptors_memblock), RA_DK_MAX_DESCRIPTORS);
     dkCmdBufBindImageDescriptorSet(priv->dk->cmdbuf,
         dkMemBlockGetGpuAddr(priv->descriptors_memblock) + RA_DK_MAX_DESCRIPTORS * sizeof(DkSamplerDescriptor),
-        priv->num_descriptors);
+        RA_DK_MAX_DESCRIPTORS);
     dkCmdBufDispatchCompute(priv->dk->cmdbuf, params->compute_groups[0],
         params->compute_groups[1], params->compute_groups[2]);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Primitives, DkInvalidateFlags_Shader | DkInvalidateFlags_Image);
@@ -1178,6 +1201,9 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
 
 static ra_timer *dk_timer_create(struct ra *ra) {
     struct priv *priv = ra->priv;
+
+    if (priv->num_queries + RA_DK_NUM_QUERIES > RA_DK_MAX_QUERIES)
+        return NULL;
 
     struct ra_dk_timer *priv_timer = talloc_zero(NULL, struct ra_dk_timer);
     if (!priv_timer)
