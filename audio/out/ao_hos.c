@@ -28,7 +28,7 @@
 #include "ao.h"
 #include "internal.h"
 
-#define MAX_CHANS 2
+#define MAX_CHANS 6 // 5.1
 #define MAX_BUF 16
 #define MAX_SAMPLES 32768
 
@@ -46,15 +46,23 @@ struct priv {
 
 static const AudioRendererConfig ar_config = {
     .output_rate     = AudioRendererOutputRate_48kHz,
-    .num_voices      = 24,
+    .num_voices      = MAX_CHANS,
     .num_effects     = 0,
     .num_sinks       = 1,
     .num_mix_objs    = 1,
     .num_mix_buffers = MAX_CHANS,
 };
 
-static const u8 sink_channels[] = {
-    0, 1,
+static const uint8_t sink_channel_ids[] = { 0, 1, 2, 3, 4, 5 };
+
+static const struct mp_chmap possible_channel_layouts[] = {
+    {0},
+    MP_CHMAP_INIT_MONO,                 // mono
+    MP_CHMAP_INIT_STEREO,               // stereo
+    MP_CHMAP3(FL, FR, LFE),             // 2.1
+    MP_CHMAP4(FL, FR, BL, BR),          // 4.0
+    MP_CHMAP5(FL, FR, FC, BL, BR),      // 5.0
+    MP_CHMAP6(FL, FR, FC, LFE, BL, BR), // 5.1
 };
 
 static int init(struct ao *ao) {
@@ -64,6 +72,9 @@ static int init(struct ao *ao) {
 
     MP_VERBOSE(ao, "Initializing hos audio\n");
 
+    ao->format   = AF_FORMAT_S16; // Only format supported by audrv with Adpcm which mpv can't output
+    ao->channels = possible_channel_layouts[MPMAX(ao->channels.num, MAX_CHANS)];
+
     rc = audrenInitialize(&ar_config);
     if (R_FAILED(rc))
         return -rc;
@@ -71,12 +82,6 @@ static int init(struct ao *ao) {
     rc = audrvCreate(&priv->driver, &ar_config, MAX_CHANS);
     if (R_FAILED(rc))
         return -rc;
-
-    // Only format supported by audrv with Adpcm which mpv can't output
-    ao->format = AF_FORMAT_S16;
-
-    if (ao->channels.num > MAX_CHANS)
-        ao->channels = (struct mp_chmap)MP_CHMAP_INIT_STEREO;
 
     size_t mempool_size = MP_ALIGN_UP(priv->num_samples * ao->channels.num *
         priv->num_buffers * sizeof(int16_t), AUDREN_MEMPOOL_ALIGNMENT);
@@ -100,7 +105,7 @@ static int init(struct ao *ao) {
 
     ao->device_buffer = priv->num_buffers * priv->num_samples;
 
-    audrvDeviceSinkAdd(&priv->driver, AUDREN_DEFAULT_DEVICE_NAME, 2, sink_channels);
+    audrvDeviceSinkAdd(&priv->driver, AUDREN_DEFAULT_DEVICE_NAME, MAX_CHANS, sink_channel_ids);
 
     rc = audrenStartAudioRenderer();
     if (R_FAILED(rc))
@@ -108,15 +113,9 @@ static int init(struct ao *ao) {
 
     audrvVoiceInit(&priv->driver, 0, ao->channels.num, PcmFormat_Int16, ao->samplerate);
     audrvVoiceSetDestinationMix(&priv->driver, 0, AUDREN_FINAL_MIX_ID);
-    if (ao->channels.num == 1) {
-        audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, 0, 0);
-        audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, 0, 1);
-    } else {
-        audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, 0, 0);
-        audrvVoiceSetMixFactor(&priv->driver, 0, 0.0f, 0, 1);
-        audrvVoiceSetMixFactor(&priv->driver, 0, 0.0f, 1, 0);
-        audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, 1, 1);
-    }
+
+    for (int i = 0; i < ao->channels.num; ++i)
+        audrvVoiceSetMixFactor(&priv->driver, 0, 1.0f, ao->channels.speaker[i], ao->channels.speaker[i]);
 
     return 0;
 }
@@ -249,14 +248,14 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg) {
                     vol = (in->left + in->right) / 200.0f;
                 }
 
-                audrvVoiceSetVolume(&priv->driver, 0, vol);
+                audrvMixSetVolume(&priv->driver, 0, vol);
                 rc = audrvUpdate(&priv->driver);
             }
             break;
         case AOCONTROL_GET_MUTE:
         case AOCONTROL_GET_VOLUME: {
                 rc = audrvUpdate(&priv->driver);
-                float vol = priv->driver.in_voices[0].volume;
+                float vol = priv->driver.in_mixes[0].volume;
                 if (cmd == AOCONTROL_GET_MUTE) {
                     bool *out = (bool *)arg;
                     *out = !vol;
@@ -270,7 +269,7 @@ static int control(struct ao *ao, enum aocontrol cmd, void *arg) {
             return CONTROL_UNKNOWN;
     }
 
-    return R_SUCCEEDED(rc);
+    return R_SUCCEEDED(rc) ? CONTROL_OK : CONTROL_ERROR;
 }
 
 #define OPT_BASE_STRUCT struct priv
