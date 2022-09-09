@@ -73,7 +73,7 @@ static int init(struct ao *ao) {
     MP_VERBOSE(ao, "Initializing hos audio\n");
 
     ao->format   = AF_FORMAT_S16; // Only format supported by audrv with Adpcm which mpv can't output
-    ao->channels = possible_channel_layouts[MPMAX(ao->channels.num, MAX_CHANS)];
+    ao->channels = possible_channel_layouts[MPMIN(ao->channels.num, MAX_CHANS)];
 
     rc = audrenInitialize(&ar_config);
     if (R_FAILED(rc))
