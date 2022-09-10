@@ -25,7 +25,7 @@
 
 #include "ra_dk.h"
 
-// See deko3d image_formats.inc
+// See deko3d format_traits.inc
 const struct dk_format formats[] = {
     { "r8",       1,  1, { 8},             DkImageFormat_R8_Unorm,      RA_CTYPE_UNORM, true,  true,  true,  true  },
     { "rg8",      2,  2, { 8,  8},         DkImageFormat_RG8_Unorm,     RA_CTYPE_UNORM, true,  true,  true,  true  },
@@ -48,6 +48,7 @@ const struct dk_format formats[] = {
     { "rgba32f",  4, 16, {32, 32, 32, 32}, DkImageFormat_RGBA32_Float,  RA_CTYPE_FLOAT, true,  true,  true,  true  },
 
     { "rgb10_a2", 4,  4, {10, 10, 10,  2}, DkImageFormat_RGB10A2_Unorm, RA_CTYPE_UNORM, true,  true,  true,  true  },
+    { "rg11b10f", 3,  4, {11, 11, 10},     DkImageFormat_RG11B10_Float, RA_CTYPE_FLOAT, true,  true,  true,  true  },
     { "bgra8",    4,  4, { 8,  8,  8,  8}, DkImageFormat_BGRA8_Unorm,   RA_CTYPE_UNORM, true,  true,  true,  false },
     { "bgrx8",    3,  4, { 8,  8,  8},     DkImageFormat_BGRX8_Unorm,   RA_CTYPE_UNORM, true,  true,  false, false },
 };
@@ -75,6 +76,7 @@ struct dk_shadercache_hdr {
     uint32_t fragment_offset, fragment_size;
     uint32_t compute_offset, compute_size;
 };
+_Static_assert(sizeof(struct dk_shadercache_hdr) == 0x20);
 
 static void dk_destroy(struct ra *ra);
 static void dk_tex_destroy(struct ra *ra, struct ra_tex *tex);
