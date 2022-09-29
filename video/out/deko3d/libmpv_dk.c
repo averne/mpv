@@ -41,8 +41,7 @@ struct priv {
 static int init(struct libmpv_gpu_context *ctx, mpv_render_param *params) {
     MP_VERBOSE(ctx, "Creating libmpv deko3d context\n");
 
-    ctx->priv = talloc_zero(NULL, struct priv);
-    struct priv *priv = ctx->priv;
+    struct priv *priv = ctx->priv = talloc_zero(ctx, struct priv);
 
     mpv_deko3d_init_params *init_params =
         get_mpv_render_param(params, MPV_RENDER_PARAM_DEKO3D_INIT_PARAMS, NULL);
@@ -160,7 +159,7 @@ static void destroy(struct libmpv_gpu_context *ctx) {
 
     MP_VERBOSE(ctx, "Destroying libmpv deko3d context\n");
 
-    if (p->ra_ctx)
+    if (p && p->ra_ctx)
         ra_dk_ctx_uninit(p->ra_ctx);
 }
 

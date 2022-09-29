@@ -192,7 +192,7 @@ mp_dk_ctx *ra_dk_get_ctx(struct ra *ra) {
 }
 
 static int ra_init_dk(struct ra *ra, mp_dk_ctx *dk) {
-    struct priv *priv = ra->priv = talloc_zero(NULL, struct priv);
+    struct priv *priv = ra->priv = talloc_zero(ra, struct priv);
     priv->dk = dk;
 
     ra->fns = &ra_fns_dk;
@@ -320,8 +320,6 @@ static void dk_destroy(struct ra *ra) {
 
     if (priv->query_memblock)
         dkMemBlockDestroy(priv->query_memblock);
-
-    talloc_free(priv);
 }
 
 struct ra *ra_create_dk(mp_dk_ctx *dk, struct mp_log *log) {
@@ -1224,7 +1222,7 @@ static ra_timer *dk_timer_create(struct ra *ra) {
     if (priv->num_queries + RA_DK_NUM_QUERIES > RA_DK_MAX_QUERIES)
         return NULL;
 
-    struct ra_dk_timer *priv_timer = talloc_zero(NULL, struct ra_dk_timer);
+    struct ra_dk_timer *priv_timer = talloc_zero(ra, struct ra_dk_timer);
     if (!priv_timer)
         return NULL;
 

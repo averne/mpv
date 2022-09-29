@@ -30,7 +30,7 @@ struct priv {
 static const struct ra_swapchain_fns ra_dk_swapchain_fns;
 
 bool ra_dk_ctx_init(struct ra_ctx *ctx, mp_dk_ctx *dk, struct ra_dk_ctx_params *params) {
-    struct ra_swapchain *sw = ctx->swapchain = talloc_ptrtype(NULL, sw);
+    struct ra_swapchain *sw = ctx->swapchain = talloc_ptrtype(ctx, sw);
     *sw = (struct ra_swapchain) {
         .ctx = ctx,
     };
@@ -59,11 +59,8 @@ bool ra_dk_ctx_init(struct ra_ctx *ctx, mp_dk_ctx *dk, struct ra_dk_ctx_params *
 }
 
 void ra_dk_ctx_uninit(struct ra_ctx *ctx) {
-    if (ctx->swapchain) {
-        talloc_free(ctx->swapchain);
-        ctx->swapchain = NULL;
-    }
-
+    if (ctx->swapchain)
+        TA_FREEP(&ctx->swapchain);
     ra_free(&ctx->ra);
 }
 
