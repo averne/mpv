@@ -88,7 +88,7 @@ static const char *mp_get_platform_path(void *talloc_ctx,
     if (global->configdir) {
         for (int n = 0; n < MP_ARRAY_SIZE(config_dirs); n++) {
             if (strcmp(config_dirs[n], type) == 0)
-                return (n == 0 && global->configdir[0]) ? global->configdir : NULL;
+                return (n < 2 && global->configdir[0]) ? global->configdir : NULL;
         }
     }
 
