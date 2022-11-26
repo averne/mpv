@@ -698,14 +698,20 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
 
 static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
                           const void *data, size_t size) {
+    struct priv *priv = ra->priv;
     struct ra_buf_dk *buf_priv = buf->priv;
 
-    memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
+    if (buf->params.type == RA_BUF_TYPE_UNIFORM) {
+        dkCmdBufPushConstants(priv->dk->cmdbuf, dkMemBlockGetGpuAddr(buf_priv->memblock),
+            dkMemBlockGetSize(buf_priv->memblock), offset, size, data);
+    } else {
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
 
-    if (buf_priv->is_cpu_cached)
-        dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
+        if (buf_priv->is_cpu_cached)
+            dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
 
-    buf_priv->dirty = true;
+        buf_priv->dirty = true;
+    }
 }
 
 static bool dk_buf_poll(struct ra *ra, struct ra_buf *buf) {
@@ -1087,6 +1093,9 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     // Reallocate vao if the data doesn't fit
     if (!pass_priv->vao_memblock || (params->vertex_count * pass_params->vertex_stride >
             dkMemBlockGetSize(pass_priv->vao_memblock))) {
+        // Wait in case an instance of this pass is already running
+        dkQueueWaitIdle(priv->dk->queue);
+
         if (pass_priv->vao_memblock)
             dkMemBlockDestroy(pass_priv->vao_memblock);
 
@@ -1098,10 +1107,6 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
         if (!pass_priv->vao_memblock)
             return;
     }
-
-    // No CPU cache flush needed
-    memcpy(dkMemBlockGetCpuAddr(pass_priv->vao_memblock), params->vertex_data,
-        params->vertex_count * pass_params->vertex_stride);
 
     DkViewport dkviewport = (DkViewport){
         params->viewport.x0, params->viewport.y0,
@@ -1124,11 +1129,13 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
     dkCmdBufBindRasterizerState(priv->dk->cmdbuf, &pass_priv->rasterizer_state);
     dkCmdBufBindColorState(priv->dk->cmdbuf, &pass_priv->color_state);
     dkCmdBufBindColorWriteState(priv->dk->cmdbuf, &pass_priv->color_write_state);
+    dkCmdBufBindDepthStencilState(priv->dk->cmdbuf, &pass_priv->depth_state);
     dkCmdBufBindVtxBuffer(priv->dk->cmdbuf, 0, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
         dkMemBlockGetSize(pass_priv->vao_memblock));
     dkCmdBufBindVtxAttribState(priv->dk->cmdbuf, pass_priv->vao_attribs, pass_params->num_vertex_attribs);
     dkCmdBufBindVtxBufferState(priv->dk->cmdbuf, &pass_priv->vao_state, 1);
-    dkCmdBufBindDepthStencilState(priv->dk->cmdbuf, &pass_priv->depth_state);
+    dkCmdBufPushData(priv->dk->cmdbuf, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
+        params->vertex_data, params->vertex_count * pass_params->vertex_stride);
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
 }
@@ -1174,6 +1181,7 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
             case RA_VARTYPE_IMG_W:
                 struct ra_tex         *inp_tex = *(struct ra_tex **)val->data;
                 struct ra_tex_dk *inp_tex_priv = inp_tex->priv;
+
                 if (inp->type == RA_VARTYPE_TEX)
                     dkCmdBufBindTexture(priv->dk->cmdbuf, stage, inp->binding,
                         dkMakeTextureHandle(inp_tex_priv->descriptor_idx, inp_tex_priv->descriptor_idx));
