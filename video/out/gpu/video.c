@@ -3842,6 +3842,7 @@ static void check_gl_features(struct gl_video *p)
             .tone_map = p->opts.tone_map,
             .early_flush = p->opts.early_flush,
             .icc_opts = p->opts.icc_opts,
+            .shader_cache_dir = p->opts.shader_cache_dir,
             .hwdec_interop = p->opts.hwdec_interop,
             .target_trc = p->opts.target_trc,
             .target_prim = p->opts.target_prim,
