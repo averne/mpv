@@ -257,6 +257,10 @@ char *mp_splitext(const char *path, bstr *root)
 
 bool mp_path_is_absolute(struct bstr path)
 {
+    // Switch extension: path with a mountpoint prefix are absolute
+    if (path.len && strchr((char *)path.start, ':'))
+        return true;
+
     if (path.len && strchr(mp_path_separators, path.start[0]))
         return true;
 
