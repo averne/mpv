@@ -535,12 +535,14 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
 
         DkMemBlockMaker memblock_maker;
         dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(memblk_size, DK_MEMBLOCK_ALIGNMENT));
-        memblock_maker.flags = DkMemBlockFlags_CpuUncached | DkMemBlockFlags_GpuCached;
+        memblock_maker.flags = DkMemBlockFlags_CpuCached | DkMemBlockFlags_GpuCached;
         memblock_maker.storage = (uint8_t *)params->src - memblk_off;
 
         memblock = dkMemBlockCreate(&memblock_maker);
         if (!memblock)
             return false;
+
+        dkMemBlockFlushCpuCache(memblock, memblk_off, params->stride * tex_rect.height * tex_rect.depth);
 
         tex_copy = (DkCopyBuf){
             dkMemBlockGetGpuAddr(memblock) + memblk_off,
