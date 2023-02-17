@@ -462,31 +462,15 @@ static struct ra_tex *dk_tex_create(struct ra *ra, const struct ra_tex_params *p
     dkImageInitialize(&tex_priv->image, &tex_layout, tex_priv->memblock, 0);
 
     if (params->initial_data) {
-        // Initial data might be stack data (ie in the case of filters)
-        // which causes issues if it is accessed concurently, so use a staging buffer
-        // TODO: Allocate a static staging buffer for this?
-        struct ra_buf *buf = dk_buf_create(ra, &(struct ra_buf_params){
-            .size         = params->w * params->h * params->format->pixel_size,
-            .initial_data = params->initial_data,
-        });
-        if (!buf) {
-            dk_buf_destroy(ra, buf);
-            dk_tex_destroy(ra, tex);
-            return NULL;
-        }
-
         bool ret = dk_tex_upload(ra, &(struct ra_tex_upload_params){
             .tex    = tex,
-            .buf    = buf,
+            .src    = params->initial_data,
             .stride = params->w * params->format->pixel_size,
         });
         if (!ret) {
-            dk_buf_destroy(ra, buf);
             dk_tex_destroy(ra, tex);
             return NULL;
         }
-
-        dk_buf_destroy(ra, buf);
     }
 
     ra_dk_register_texture(ra, tex);
