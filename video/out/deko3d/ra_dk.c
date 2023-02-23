@@ -673,6 +673,10 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
         return NULL;
     }
 
+    // The buffer will be updated using push constants, so flush the cpu cache now
+    if (params->type == RA_BUF_TYPE_UNIFORM)
+        dkMemBlockFlushCpuCache(buf_priv->memblock, 0, dkMemBlockGetSize(buf_priv->memblock));
+
     if (params->host_mapped)
         buf->data = dkMemBlockGetCpuAddr(buf_priv->memblock);
 
@@ -684,15 +688,17 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
 
 static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
                           const void *data, size_t size) {
-    struct priv *priv = ra->priv;
+    struct priv          *priv = ra->priv;
     struct ra_buf_dk *buf_priv = buf->priv;
 
     if (buf->params.type == RA_BUF_TYPE_UNIFORM) {
         dkCmdBufPushConstants(priv->dk->cmdbuf, dkMemBlockGetGpuAddr(buf_priv->memblock),
             dkMemBlockGetSize(buf_priv->memblock), offset, size, data);
     } else {
-        memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
+        // Wait in case this buffer is currently being used
+        dkQueueWaitIdle(priv->dk->queue);
 
+        memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
         if (buf_priv->is_cpu_cached)
             dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
 
