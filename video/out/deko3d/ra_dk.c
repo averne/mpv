@@ -305,21 +305,22 @@ static void dk_destroy(struct ra *ra) {
 
     MP_VERBOSE(ra, "%s\n", __func__);
 
-    if (priv->dk->queue) {
+    if (priv->dk->queue)
         dkQueueWaitIdle(priv->dk->queue);
-        dkQueueDestroy(priv->dk->queue);
-    }
-
-    if (priv->dk->cmdbuf)
-        dkCmdBufDestroy(priv->dk->cmdbuf);
-    if (priv->dk->cmdbuf_memblock)
-        dkMemBlockDestroy(priv->dk->cmdbuf_memblock);
 
     if (priv->descriptors_memblock)
         dkMemBlockDestroy(priv->descriptors_memblock);
 
     if (priv->query_memblock)
         dkMemBlockDestroy(priv->query_memblock);
+
+    if (priv->dk->cmdbuf)
+        dkCmdBufDestroy(priv->dk->cmdbuf);
+    if (priv->dk->cmdbuf_memblock)
+        dkMemBlockDestroy(priv->dk->cmdbuf_memblock);
+
+    if (priv->dk->queue)
+        dkQueueDestroy(priv->dk->queue);
 }
 
 struct ra *ra_create_dk(mp_dk_ctx *dk, struct mp_log *log) {
@@ -509,7 +510,7 @@ static bool dk_tex_upload(struct ra *ra, const struct ra_tex_upload_params *para
             params->stride, tex_rect.height * tex_rect.depth,
         };
 
-        if (buf_priv->is_cpu_cached)
+        if (params->buf->params.host_mapped)
             dkMemBlockFlushCpuCache(buf_priv->memblock, params->buf_offset,
                 params->stride * tex_rect.height * tex_rect.depth);
     } else {
@@ -660,22 +661,19 @@ static struct ra_buf *dk_buf_create(struct ra *ra, const struct ra_buf_params *p
         return NULL;
     }
 
-    buf_priv->is_cpu_cached = params->host_mapped || params->host_mutable;
+    buf_priv->is_cpu_cached = params->type == RA_BUF_TYPE_TEX_UPLOAD;
 
     DkMemBlockMaker memblock_maker;
     dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, MP_ALIGN_UP(params->size, DK_MEMBLOCK_ALIGNMENT));
-    memblock_maker.flags = (buf_priv->is_cpu_cached ? DkMemBlockFlags_CpuCached : DkMemBlockFlags_CpuUncached) |
-        DkMemBlockFlags_GpuCached;
+    memblock_maker.flags =
+        ( buf_priv->is_cpu_cached ? DkMemBlockFlags_CpuCached : DkMemBlockFlags_CpuUncached) |
+        (!buf_priv->is_cpu_cached ? DkMemBlockFlags_GpuCached : DkMemBlockFlags_GpuUncached);
 
     buf_priv->memblock = dkMemBlockCreate(&memblock_maker);
     if (!buf_priv->memblock) {
         dk_buf_destroy(ra, buf);
         return NULL;
     }
-
-    // The buffer will be updated using push constants, so flush the cpu cache now
-    if (params->type == RA_BUF_TYPE_UNIFORM)
-        dkMemBlockFlushCpuCache(buf_priv->memblock, 0, dkMemBlockGetSize(buf_priv->memblock));
 
     if (params->host_mapped)
         buf->data = dkMemBlockGetCpuAddr(buf_priv->memblock);
@@ -701,8 +699,6 @@ static void dk_buf_update(struct ra *ra, struct ra_buf *buf, ptrdiff_t offset,
         memcpy((uint8_t *)dkMemBlockGetCpuAddr(buf_priv->memblock) + offset, data, size);
         if (buf_priv->is_cpu_cached)
             dkMemBlockFlushCpuCache(buf_priv->memblock, offset, size);
-
-        buf_priv->dirty = true;
     }
 }
 
@@ -1164,7 +1160,6 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
         DkStage_Fragment : DkStage_Compute;
 
     for (int i = 0; i < params->num_values; ++i) {
-        bool has_buf_barrier = false;
         struct ra_renderpass_input_val *val = &params->values[i];
         struct ra_renderpass_input     *inp = &params->pass->params.inputs[val->index];
 
@@ -1186,20 +1181,18 @@ static void dk_renderpass_run(struct ra *ra, const struct ra_renderpass_run_para
                 struct ra_buf         *inp_buf = *(struct ra_buf **)val->data;
                 struct ra_buf_dk *inp_buf_priv = inp_buf->priv;
 
+                // For host-mutable buffers, the cache was flushed in buf_update,
+                // and for other buffer types, updating is not possible.
+                if (inp_buf->params.host_mapped)
+                    dkMemBlockFlushCpuCache(inp_buf_priv->memblock, 0,
+                        dkMemBlockGetSize(inp_buf_priv->memblock));
+
                 if (inp->type == RA_VARTYPE_BUF_RO)
                     dkCmdBufBindUniformBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
                 else
                     dkCmdBufBindStorageBuffer(priv->dk->cmdbuf, stage, inp->binding,
                         dkMemBlockGetGpuAddr(inp_buf_priv->memblock), inp_buf->params.size);
-
-                if (inp_buf_priv->dirty) {
-                    if (!has_buf_barrier) {
-                        dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Shader);
-                        has_buf_barrier = true;
-                    }
-                    inp_buf_priv->dirty = false;
-                }
                 break;
             default:
                 break;
