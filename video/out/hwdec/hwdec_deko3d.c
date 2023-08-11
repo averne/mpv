@@ -155,7 +155,7 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
 
 static int mapper_map(struct ra_hwdec_mapper *mapper) {
     struct priv *priv = mapper->priv;
-    AVTX1Map     *map = (AVTX1Map *)mapper->src->planes[3];
+    AVTX1Map     *map = (AVTX1Map *)mapper->src->bufs[0]->data;
 
     for (int i = 0; i < priv->num_cached_textures; ++i) {
         if (priv->cached_textures[i].handle == ff_tx1_map_get_handle(map)) {
