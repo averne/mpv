@@ -210,15 +210,21 @@ static void enable_output(struct sd *sd, bool enable)
             [PlSharedFontType_NintendoExt]          = "NintendoExt003",
         };
 
-        PlFontData font;
-        for (int i = 0; i < PlSharedFontType_Total; ++i) {
-            Result rc = plGetSharedFontByType(&font, i);
-            if (R_SUCCEEDED(rc))
-                ass_add_font(ctx->ass_library, pl_font_names[font.type],
-                    font.address, font.size);
-            else
-                MP_ERR(sd, "Failed to add font %s from pl: %#x\n", pl_font_names[i], rc);
+        Result rc = plInitialize(PlServiceType_User);
+        if (R_SUCCEEDED(rc)) {
+            PlFontData font;
+            for (int i = 0; i < PlSharedFontType_Total; ++i) {
+                rc = plGetSharedFontByType(&font, i);
+                if (R_SUCCEEDED(rc))
+                    ass_add_font(ctx->ass_library, pl_font_names[font.type],
+                        font.address, font.size);
+                else
+                    MP_ERR(sd, "Failed to add font %s from pl: %#x\n", pl_font_names[i], rc);
+            }
+
+            plExit();
         }
+
 #endif
 
         mp_ass_configure_fonts(ctx->ass_renderer, sd->opts->sub_style,
