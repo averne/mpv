@@ -1,6 +1,6 @@
 /*
  * audio output driver for Horizon OS using audren
- * Copyright (C) 2021 averne <averne381@gmail.com>
+ * Copyright (c) 2023 averne <averne381@gmail.com>
  *
  * This file is part of mpv.
  *
