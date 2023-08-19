@@ -35,9 +35,14 @@ struct priv_owner {
     struct mp_hwdec_ctx hwctx;
 };
 
-// Arrays hardcoded to two members since only NV12 is supported
+// Arrays hardcoded to two members since only up to NV12 is supported
 struct priv {
     mp_dk_ctx *dk;
+
+    bool has_calculated_layouts;
+    DkImageLayoutMaker dklayout_makers[2];
+    int num_planes;
+
     DkImageLayout dklayouts[2];
 
     struct cached_texture {
@@ -48,11 +53,13 @@ struct priv {
     int num_cached_textures;
 };
 
-// Nvdec can render to NV12 and YV12 surfaces, the FFmpeg backend hardcodes for NV12
+// NVDEC can render to NV12 and YV12 surfaces, the FFmpeg backend hardcodes for NV12
+// NVJPG can decode to grayscale surfaces
 static const int supported_formats[] = {
+    IMGFMT_Y8,
     IMGFMT_NV12,
     IMGFMT_P010,
-    0,
+    IMGFMT_NONE,
 };
 
 static int init(struct ra_hwdec *hw) {
@@ -101,26 +108,24 @@ static int mapper_init(struct ra_hwdec_mapper *mapper) {
     struct mp_image layout;
     mp_image_set_params(&layout, &mapper->dst_params);
 
-    priv->dk = ra_dk_get_ctx(mapper->ra);
-
     struct ra_imgfmt_desc desc;
     if (!ra_get_imgfmt_desc(mapper->ra, mapper->dst_params.imgfmt, &desc)) {
         MP_ERR(mapper, "Unsupported format: %s\n", mp_imgfmt_to_name(mapper->dst_params.imgfmt));
         return -1;
     }
 
-    for (int i = 0; i < desc.num_planes; ++i) {
-        DkImageLayoutMaker layout_maker;
-        dkImageLayoutMakerDefaults(&layout_maker, priv->dk->device);
-        layout_maker.type          = DkImageType_2D;
-        layout_maker.format        = ((struct dk_format *)desc.planes[i]->priv)->fmt;
-        layout_maker.dimensions[0] = mp_image_plane_w(&layout, i);
-        layout_maker.dimensions[1] = mp_image_plane_h(&layout, i);
-        layout_maker.dimensions[2] = 1;
-        layout_maker.flags         = DkImageFlags_UsageLoadStore |
-            DkImageFlags_Usage2DEngine | DkImageFlags_UsageVideo;
+    priv->dk                     = ra_dk_get_ctx(mapper->ra);
+    priv->num_planes             = desc.num_planes;
+    priv->has_calculated_layouts = false;
 
-        dkImageLayoutInitialize(&priv->dklayouts[i], &layout_maker);
+    for (int i = 0; i < priv->num_planes; ++i) {
+        DkImageLayoutMaker *layout_maker = &priv->dklayout_makers[i];
+        dkImageLayoutMakerDefaults(layout_maker, priv->dk->device);
+        layout_maker->type          = DkImageType_2D;
+        layout_maker->format        = ((struct dk_format *)desc.planes[i]->priv)->fmt;
+        layout_maker->dimensions[0] = mp_image_plane_w(&layout, i);
+        layout_maker->dimensions[1] = mp_image_plane_h(&layout, i);
+        layout_maker->dimensions[2] = 1;
 
         mapper->tex[i] = talloc_zero(mapper, struct ra_tex);
         if (!mapper->tex[i])
@@ -146,8 +151,8 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
     MP_VERBOSE(mapper, "%s\n", __func__);
 
     for (int i = 0; i < priv->num_cached_textures; ++i) {
-        ra_dk_unregister_texture(mapper->ra, priv->cached_textures[i].tex[0]);
-        ra_dk_unregister_texture(mapper->ra, priv->cached_textures[i].tex[1]);
+        for (int j = 0; j < priv->num_planes; ++j)
+            ra_dk_unregister_texture(mapper->ra, priv->cached_textures[i].tex[j]);
         if (priv->cached_textures[i].memblock)
             dkMemBlockDestroy(priv->cached_textures[i].memblock);
     }
@@ -156,6 +161,19 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
 static int mapper_map(struct ra_hwdec_mapper *mapper) {
     struct priv *priv = mapper->priv;
     AVTX1Map     *map = (AVTX1Map *)mapper->src->bufs[0]->data;
+
+    if (!priv->has_calculated_layouts) {
+        for (int i = 0; i < priv->num_planes; ++i) {
+            DkImageLayoutMaker *layout_maker = &priv->dklayout_makers[i];
+            layout_maker->flags = DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine |
+                (!map->is_linear ? DkImageFlags_UsageVideo : DkImageFlags_PitchLinear);
+            layout_maker->pitchStride = mapper->src->stride[i];
+
+            dkImageLayoutInitialize(&priv->dklayouts[i], layout_maker);
+        }
+
+        priv->has_calculated_layouts = true;
+    }
 
     for (int i = 0; i < priv->num_cached_textures; ++i) {
         if (priv->cached_textures[i].handle == ff_tx1_map_get_handle(map)) {
@@ -182,7 +200,7 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
     if (!cache.memblock)
         return -1;
 
-    for (int i = 0; i < MP_ARRAY_SIZE(priv->dklayouts); ++i) {
+    for (int i = 0; i < priv->num_planes; ++i) {
         DkImage image;
         dkImageInitialize(&image, &priv->dklayouts[i], cache.memblock,
             (uintptr_t)(mapper->src->planes[i] - mapper->src->planes[0]));
