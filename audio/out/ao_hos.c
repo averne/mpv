@@ -90,7 +90,7 @@ static int init(struct ao *ao) {
     if (!priv->pool)
         return -1;
 
-    priv->buffers = malloc(sizeof(AudioDriverWaveBuf) * priv->num_buffers);
+    priv->buffers = talloc_array(priv, AudioDriverWaveBuf, priv->num_buffers);
     for (int i = 0; i < priv->num_buffers; ++i) {
         priv->buffers[i] = (AudioDriverWaveBuf){
             .data_raw            = priv->pool,
@@ -130,7 +130,7 @@ static void uninit(struct ao *ao) {
 
     audrvClose(&priv->driver);
     audrenExit();
-    free(priv->buffers);
+
     free(priv->pool);
 }
 
@@ -170,35 +170,34 @@ static int find_free_wavebuf(struct priv *priv) {
 static bool audio_write(struct ao *ao, void **data, int samples) {
     struct priv *priv = ao->priv;
 
-    int idx = (priv->cur_buf_idx != -1) ? priv->cur_buf_idx : find_free_wavebuf(priv);
-    if (idx == -1)
-        return false;
-    priv->cur_buf_idx = idx;
+    // We requested a linear format so there is only one buffer
+    uint8_t *dat = data[0];
 
-    AudioDriverWaveBuf *buf = &priv->buffers[idx];
-    uint8_t *buf_offset = (uint8_t *)buf->data_raw + (idx * priv->num_samples * ao->sstride);
+    while (samples) {
+        int idx = (priv->cur_buf_idx != -1) ? priv->cur_buf_idx : find_free_wavebuf(priv);
+        if (idx == -1)
+            return false;
+        priv->cur_buf_idx = idx;
 
-    size_t num_samples = MPMIN(samples, priv->num_samples - priv->cur_queued_samples);
-    size_t size        = num_samples * ao->sstride;
+        AudioDriverWaveBuf *buf = &priv->buffers[idx];
+        uint8_t *buf_offset = (uint8_t *)buf->data_raw + (idx * priv->num_samples * ao->sstride);
 
-    // We requested a linear PCM format so there is only one buffer
-    memcpy(buf_offset + priv->cur_queued_samples * ao->sstride, data[0], size);
-    priv->cur_queued_samples   += num_samples;
-    priv->total_queued_samples += num_samples;
+        size_t num_samples = MPMIN(samples, priv->num_samples - priv->cur_queued_samples);
 
-    if (priv->cur_queued_samples >= priv->num_samples) {
+        memcpy(buf_offset + priv->cur_queued_samples * ao->sstride, dat, num_samples * ao->sstride);
+        priv->cur_queued_samples   += num_samples;
+        priv->total_queued_samples += num_samples;
+
+        dat     += num_samples * ao->sstride;
+        samples -= num_samples;
+
         // Append buffer once it's full
-        armDCacheFlush(buf_offset, priv->num_samples * ao->sstride);
-        audrvVoiceAddWaveBuf(&priv->driver, 0, buf);
-        audrvUpdate(&priv->driver);
+        if (priv->cur_queued_samples >= priv->num_samples) {
+            armDCacheFlush(buf_offset, priv->num_samples * ao->sstride);
+            audrvVoiceAddWaveBuf(&priv->driver, 0, buf);
+            audrvUpdate(&priv->driver);
 
-        priv->cur_buf_idx = -1, priv->cur_queued_samples = 0;
-
-        // Write the rest of the data
-        int remaining = samples - num_samples;
-        if (remaining) {
-            void *dat = (uint8_t *)(data[0]) + size;
-            return audio_write(ao, &dat, remaining);
+            priv->cur_buf_idx = -1, priv->cur_queued_samples = 0;
         }
     }
 
