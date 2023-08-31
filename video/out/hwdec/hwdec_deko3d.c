@@ -40,7 +40,6 @@ struct priv {
     mp_dk_ctx *dk;
 
     bool has_calculated_layouts;
-    DkImageLayoutMaker dklayout_makers[2];
     int num_planes;
 
     DkImageLayout dklayouts[2];
@@ -119,26 +118,18 @@ static int mapper_init(struct ra_hwdec_mapper *mapper) {
     priv->has_calculated_layouts = false;
 
     for (int i = 0; i < priv->num_planes; ++i) {
-        DkImageLayoutMaker *layout_maker = &priv->dklayout_makers[i];
-        dkImageLayoutMakerDefaults(layout_maker, priv->dk->device);
-        layout_maker->type          = DkImageType_2D;
-        layout_maker->format        = ((struct dk_format *)desc.planes[i]->priv)->fmt;
-        layout_maker->dimensions[0] = mp_image_plane_w(&layout, i);
-        layout_maker->dimensions[1] = mp_image_plane_h(&layout, i);
-        layout_maker->dimensions[2] = 1;
-
         mapper->tex[i] = talloc_zero(mapper, struct ra_tex);
         if (!mapper->tex[i])
             return -1;
 
-        mapper->tex[i]->params = (struct ra_tex_params) {
+        mapper->tex[i]->params = (struct ra_tex_params){
             .dimensions = 2,
             .w          = mp_image_plane_w(&layout, i),
             .h          = mp_image_plane_h(&layout, i),
             .d          = 1,
             .format     = desc.planes[i],
             .render_src = true,
-            .src_linear = desc.planes[i]->linear_filter,
+            .src_linear = true,
         };
     }
 
@@ -164,12 +155,21 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
 
     if (!priv->has_calculated_layouts) {
         for (int i = 0; i < priv->num_planes; ++i) {
-            DkImageLayoutMaker *layout_maker = &priv->dklayout_makers[i];
-            layout_maker->flags = DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine |
-                (!map->is_linear ? DkImageFlags_UsageVideo : DkImageFlags_PitchLinear);
-            layout_maker->pitchStride = mapper->src->stride[i];
+            struct ra_tex_params *params = &mapper->tex[i]->params;
 
-            dkImageLayoutInitialize(&priv->dklayouts[i], layout_maker);
+            DkImageLayoutMaker layout_maker;
+            dkImageLayoutMakerDefaults(&layout_maker, priv->dk->device);
+            layout_maker.type          = DkImageType_2D;
+            layout_maker.format        = ((struct dk_format *)params->format->priv)->fmt;
+            layout_maker.dimensions[0] = params->w;
+            layout_maker.dimensions[1] = params->h;
+            layout_maker.dimensions[2] = 1;
+
+            layout_maker.flags = DkImageFlags_UsageLoadStore | DkImageFlags_Usage2DEngine |
+                (!map->is_linear ? DkImageFlags_UsageVideo : DkImageFlags_PitchLinear);
+            layout_maker.pitchStride = mapper->src->stride[i];
+
+            dkImageLayoutInitialize(&priv->dklayouts[i], &layout_maker);
         }
 
         priv->has_calculated_layouts = true;
