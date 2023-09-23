@@ -104,7 +104,7 @@ void mp_ass_configure_fonts(ASS_Renderer *priv, struct osd_style_opts *opts,
         font_provider = ASS_FONTPROVIDER_FONTCONFIG;
 
     mp_verbose(log, "Setting up fonts...\n");
-    ass_set_fonts(priv, default_font, "nintendo_udsg-r_std_003", font_provider, config, 1);
+    ass_set_fonts(priv, default_font, opts->font, font_provider, config, 1);
     mp_verbose(log, "Done.\n");
 
     talloc_free(tmp);
