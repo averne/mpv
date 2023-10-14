@@ -157,6 +157,10 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
         for (int i = 0; i < priv->num_planes; ++i) {
             struct ra_tex_params *params = &mapper->tex[i]->params;
 
+            // Update the width to match the coded width, which might be different from
+            // the displayed dimensions
+            params->w = mapper->src->stride[i] / params->format->pixel_size;
+
             DkImageLayoutMaker layout_maker;
             dkImageLayoutMakerDefaults(&layout_maker, priv->dk->device);
             layout_maker.type          = DkImageType_2D;
