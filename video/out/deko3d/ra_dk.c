@@ -1096,6 +1096,17 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
             return;
     }
 
+    // If the vertex data cannot fit in the inline engine, perform the copy ourselves
+    // XXX: How is this constant calculated?
+    size_t vao_size = params->vertex_count * pass_params->vertex_stride;
+    if (vao_size < 0x7ffc) {
+        dkCmdBufPushData(priv->dk->cmdbuf, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
+            params->vertex_data, vao_size);
+    } else {
+        dkQueueWaitIdle(priv->dk->queue);
+        memcpy(dkMemBlockGetCpuAddr(pass_priv->vao_memblock), params->vertex_data, vao_size);
+    }
+
     DkViewport dkviewport = (DkViewport){
         params->viewport.x0, params->viewport.y0,
         mp_rect_w(params->viewport), mp_rect_h(params->viewport),
@@ -1122,8 +1133,6 @@ static void dk_renderpass_run_raster(struct ra *ra, const struct ra_renderpass_r
         dkMemBlockGetSize(pass_priv->vao_memblock));
     dkCmdBufBindVtxAttribState(priv->dk->cmdbuf, pass_priv->vao_attribs, pass_params->num_vertex_attribs);
     dkCmdBufBindVtxBufferState(priv->dk->cmdbuf, &pass_priv->vao_state, 1);
-    dkCmdBufPushData(priv->dk->cmdbuf, dkMemBlockGetGpuAddr(pass_priv->vao_memblock),
-        params->vertex_data, params->vertex_count * pass_params->vertex_stride);
     dkCmdBufDraw(priv->dk->cmdbuf, DkPrimitive_Triangles, params->vertex_count, 1, 0, 0);
     dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_Fragments, DkInvalidateFlags_Image);
 }
