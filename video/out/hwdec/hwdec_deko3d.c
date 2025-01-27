@@ -21,8 +21,7 @@
 #include <switch.h>
 
 #include <libavutil/hwcontext.h>
-#include <libavutil/hwcontext_nvtegra.h>
-#include <libavutil/nvtegra.h>
+#include <libavutil/hwcontext_envideo.h>
 
 #include "config.h"
 
@@ -46,7 +45,6 @@ struct priv {
     bool is_linear;
 
     struct cached_texture {
-        AVBufferRef *buf_ref;
         AVHWFramesContext *frames_ctx;
 
         uint32_t handle;
@@ -73,7 +71,7 @@ static int init(struct ra_hwdec *hw) {
     MP_VERBOSE(hw, "%s\n", __func__);
 
     AVBufferRef *hw_device_ctx = NULL;
-    if ((av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_NVTEGRA, NULL, NULL, 0) < 0)
+    if ((av_hwdevice_ctx_create(&hw_device_ctx, AV_HWDEVICE_TYPE_ENVIDEO, NULL, NULL, 0) < 0)
             || (hw_device_ctx == NULL))
         goto error;
 
@@ -81,7 +79,7 @@ static int init(struct ra_hwdec *hw) {
         .driver_name       = hw->driver->name,
         .av_device_ref     = hw_device_ctx,
         .supported_formats = supported_formats,
-        .hw_imgfmt         = IMGFMT_NVTEGRA,
+        .hw_imgfmt         = IMGFMT_ENVIDEO,
     };
     hwdec_devices_add(hw->devs, &priv->hwctx);
 
@@ -150,8 +148,6 @@ static void destroy_cache_entry(struct ra_hwdec_mapper *mapper, struct cached_te
 
     if (e->memblock)
         dkMemBlockDestroy(e->memblock);
-
-    av_buffer_unref(&e->buf_ref);
 }
 
 static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
@@ -165,19 +161,18 @@ static void mapper_uninit(struct ra_hwdec_mapper *mapper) {
 
 static int mapper_map(struct ra_hwdec_mapper *mapper) {
     struct priv *priv = mapper->priv;
-    AVNVTegraFrame *frame = (AVNVTegraFrame *)mapper->src->bufs[0]->data;
-    AVNVTegraMap *map = (AVNVTegraMap *)frame->map_ref->data;
+    AVEnvideoFrame *frame = (AVEnvideoFrame *)mapper->src->bufs[0]->data;
+    EnvideoMap *map = (EnvideoMap *)frame->map;
 
-    if ((priv->is_linear != map->is_linear) || !priv->has_calculated_layouts) {
-        priv->is_linear = map->is_linear;
+    if ((priv->is_linear != frame->is_pitch) || !priv->has_calculated_layouts) {
+        priv->is_linear = frame->is_pitch;
 
         for (int i = 0; i < priv->num_planes; ++i) {
             struct ra_tex_params *params = &mapper->tex[i]->params;
 
             // If the width (aligned to relevant boundaries) is not equal to the stride
             // (for example because of cropping), set it to the latter
-            //  Alignment is 64B for block (GOB requirement) and 256B for pitch linear (VIC requirement)
-            int align = (!map->is_linear ? 64 : 256)  / mapper->tex[i]->params.format->pixel_size;
+            int align = ENVIDEO_WIDTH_ALIGN(mapper->tex[i]->params.format->pixel_size);
             int texel_stride = mapper->src->stride[i] / mapper->tex[i]->params.format->pixel_size;
             if (MP_ALIGN_UP(params->w, align) != texel_stride)
                 params->w = texel_stride;
@@ -205,9 +200,8 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
         priv->has_calculated_layouts = true;
     }
 
-    AVHWFramesContext *hwctx = (AVHWFramesContext *)mapper->src->hwctx->data;
-
     // Clean up stale cached frames
+    AVHWFramesContext *hwctx = (AVHWFramesContext *)mapper->src->hwctx->data;
     for (int i = priv->num_cached_textures - 1; i >= 0; --i) {
         if (priv->cached_textures[i].frames_ctx != hwctx) {
             destroy_cache_entry(mapper, &priv->cached_textures[i]);
@@ -215,55 +209,58 @@ static int mapper_map(struct ra_hwdec_mapper *mapper) {
         }
     }
 
+    // Wait for the decode to complete
+    // Submit immediately so that deko3d doesn't keep a dangling pointer to the decode fence
+    DkFence fence;
+    dkFenceImport(&fence, frame->fence >> 32, frame->fence >> 0);
+    dkCmdBufWaitFence(priv->dk->cmdbuf, &fence);
+    dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
+
     for (int i = 0; i < priv->num_cached_textures; ++i) {
-        if (priv->cached_textures[i].handle == av_nvtegra_map_get_handle(map)) {
+        struct cached_texture *e = &priv->cached_textures[i];
+        if (e->handle == envideo_map_get_handle(map)) {
             for (int j = 0; j < priv->num_planes; ++j)
-                mapper->tex[j]->priv = priv->cached_textures[i].tex[j];
+                mapper->tex[j]->priv = e->tex[j];
 
             // Invalidate texture cache
             dkCmdBufBarrier(priv->dk->cmdbuf, DkBarrier_None, DkInvalidateFlags_Image);
             dkQueueSubmitCommands(priv->dk->queue, dkCmdBufFinishList(priv->dk->cmdbuf));
-
             return 0;
         }
     }
 
-    struct cached_texture cache;
-    cache.buf_ref = av_buffer_ref(frame->map_ref);
-    if (!cache.buf_ref)
-        return -1;
-
-    cache.handle = av_nvtegra_map_get_handle(map);
-    cache.frames_ctx = hwctx;
+    struct cached_texture e = {0};
+    e.frames_ctx = hwctx;
+    e.handle     = envideo_map_get_handle(map);
 
     DkMemBlockMaker memblock_maker;
-    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, av_nvtegra_map_get_size(map));
+    dkMemBlockMakerDefaults(&memblock_maker, priv->dk->device, envideo_map_get_size(map));
     memblock_maker.flags   = DkMemBlockFlags_CpuUncached |
         DkMemBlockFlags_GpuCached | DkMemBlockFlags_Image;
-    memblock_maker.storage = av_nvtegra_map_get_addr(map);
-    cache.memblock = dkMemBlockCreate(&memblock_maker);
-    if (!cache.memblock)
+    memblock_maker.storage = envideo_map_get_cpu_addr(map);
+    e.memblock = dkMemBlockCreate(&memblock_maker);
+    if (!e.memblock)
         return -1;
 
     for (int i = 0; i < priv->num_planes; ++i) {
         DkImage image;
-        dkImageInitialize(&image, &priv->dklayouts[i], cache.memblock,
+        dkImageInitialize(&image, &priv->dklayouts[i], e.memblock,
             (uintptr_t)(mapper->src->planes[i] - mapper->src->planes[0]));
 
         struct ra_tex_dk *tex_priv = mapper->tex[i]->priv = talloc_zero(mapper->tex[i], struct ra_tex_dk);
         if (!tex_priv) {
-            dkMemBlockDestroy(cache.memblock);
+            dkMemBlockDestroy(e.memblock);
             return -1;
         }
 
         tex_priv->image    = image;
-        tex_priv->memblock = cache.memblock;
+        tex_priv->memblock = e.memblock;
 
         ra_dk_register_texture(mapper->ra, mapper->tex[i]);
-        cache.tex[i] = mapper->tex[i]->priv;
+        e.tex[i] = mapper->tex[i]->priv;
     }
 
-    MP_TARRAY_APPEND(mapper, priv->cached_textures, priv->num_cached_textures, cache);
+    MP_TARRAY_APPEND(mapper, priv->cached_textures, priv->num_cached_textures, e);
 
     return 0;
 }
@@ -272,10 +269,10 @@ static void mapper_unmap(struct ra_hwdec_mapper *mapper) {
     // Do nothing
 }
 
-const struct ra_hwdec_driver ra_hwdec_nvtegra = {
-    .name          = "nvtegra",
+const struct ra_hwdec_driver ra_hwdec_envideo = {
+    .name          = "envideo",
     .priv_size     = sizeof(struct priv_owner),
-    .imgfmts       = {IMGFMT_NVTEGRA, 0},
+    .imgfmts       = {IMGFMT_ENVIDEO, 0},
     .init          = init,
     .uninit        = uninit,
     .mapper        = &(const struct ra_hwdec_mapper_driver){

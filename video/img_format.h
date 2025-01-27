@@ -278,7 +278,7 @@ enum mp_imgfmt {
     IMGFMT_MMAL,            // MMAL_BUFFER_HEADER_T
     IMGFMT_MEDIACODEC,      // AVMediaCodecBuffer
     IMGFMT_CUDA,            // CUDA Buffer
-    IMGFMT_NVTEGRA,         // AVNVTegraMap
+    IMGFMT_ENVIDEO,         // AvEnvideoFrame
 
     // Not an actual format; base for mpv-specific descriptor table.
     // Some may still map to AV_PIX_FMT_*.
