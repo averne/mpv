@@ -55,13 +55,16 @@ struct priv {
 };
 
 // NVDEC can render to NV12 and YV12 surfaces, the FFmpeg backend hardcodes for NV12
-// NVJPG can decode to grayscale surfaces
+// NVJPG can decode to grayscale, YUV422P, YUV440P and YUV444P surfaces
 // Some filters will output YUV420P and upload that to a hardware surface
 static const int supported_formats[] = {
     IMGFMT_Y8,
     IMGFMT_NV12,
     IMGFMT_P010,
     IMGFMT_420P,
+    IMGFMT_444P,
+    IMGFMT_AVPIXFMT_START + AV_PIX_FMT_YUV422P,
+    IMGFMT_AVPIXFMT_START + AV_PIX_FMT_YUV440P,
     IMGFMT_NONE,
 };
 
